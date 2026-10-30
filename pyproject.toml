@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forex-scanner"
+version = "1.0.0"
+description = "Scans major FX pairs for daily inside-day compressions and builds a breakout trading plan."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "pandas>=2.0",
+    "yfinance>=0.2.40",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+forex-scanner = "forex_scanner.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["forex_scanner*"]
+
+[tool.pytest.ini_options]
+addopts = "-p no:libtmux"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

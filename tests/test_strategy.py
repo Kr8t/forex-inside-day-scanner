@@ -52,12 +52,19 @@ def test_partial_today_bar_is_excluded():
     assert plan["inside_day"]["inside_date"] == good.index[-1]
 
 
-def test_lookback_sessions_finds_older_inside_day():
+def test_stale_coil_is_not_reported_as_actionable_plan():
+    """An inside day older than the latest completed bar has already had its
+    breakout window pass — it must never appear as today's plan."""
     df = make_df([MOTHER, INSIDE, (1.03, 1.06, 1.03, 1.05)])
     assert strategy.get_daily_plan("EURUSD", df, lookback_sessions=1) is None
-    plan = strategy.get_daily_plan("EURUSD", df, lookback_sessions=2)
-    assert plan is not None
-    assert plan["inside_day"]["inside_date"] == df.index[1]
+    assert strategy.get_daily_plan("EURUSD", df, lookback_sessions=3) is None
+
+
+def test_find_inside_day_only_returns_latest_pair():
+    bars = make_df([MOTHER, MOTHER, INSIDE])
+    assert strategy.find_inside_day(bars, 1) == (-1, -2)
+    # Only two bars: below MIN_ROWS_FOR_ANALYSIS -> no scan.
+    assert strategy.find_inside_day(bars.iloc[:2], 3) is None
 
 
 def test_buffer_applied_to_levels(monkeypatch):
@@ -149,21 +156,21 @@ def test_close_exactly_at_prev_high_is_not_cib():
     assert plan is None
 
 
-def test_cib_filter_suppresses_stale_coil():
-    # Older inside day, but the newest bar closed in breakout above it.
-    df = make_df([MOTHER, INSIDE, (1.08, 1.12, 1.07, 1.11)])
-    suppressed = strategy.get_daily_plan("EURUSD", df, lookback_sessions=2,
-                                         apply_cib_filter=True)
+def test_cib_filter_suppresses_coil_on_same_bar():
+    # A bar can be an inside day *and* close beyond the mother's extremes
+    # when the mother itself was a huge range day; the filter still wins.
+    big_mother = (1.00, 1.20, 0.90, 1.10)   # H 1.20 / L 0.90
+    coil_cib = (1.05, 1.19, 0.95, 1.21)     # inside big_mother, closes > 1.20
+    df = make_df([MOTHER, big_mother, coil_cib])
+    suppressed = strategy.get_daily_plan("EURUSD", df, apply_cib_filter=True)
     assert suppressed["inside_day"] is None
     assert suppressed["cib"]["direction"] == "up"
-    # With the filter off, the coil is still reported alongside the CIB.
-    both = strategy.get_daily_plan("EURUSD", df, lookback_sessions=2,
-                                   apply_cib_filter=False)
+    # With the filter off, both signals are reported.
+    both = strategy.get_daily_plan("EURUSD", df, apply_cib_filter=False)
     assert both["inside_day"] is not None
     assert both["cib"] is not None
     # Legacy kwarg still honoured.
-    legacy = strategy.get_daily_plan("EURUSD", df, lookback_sessions=2,
-                                     apply_blackout_filter=True)
+    legacy = strategy.get_daily_plan("EURUSD", df, apply_blackout_filter=True)
     assert legacy["inside_day"] is None
 
 

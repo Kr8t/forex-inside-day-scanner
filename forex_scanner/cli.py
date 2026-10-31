@@ -14,7 +14,7 @@ from .data import fetch_all
 from .strategy import get_daily_plan, pip_size
 
 console = Console()
-COLOR_MAP = {"green": "bold green", "red": "bold red", "neutral": "yellow"}
+COLOR_MAP = {"green": "green", "red": "red", "neutral": "yellow"}
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -53,14 +53,10 @@ def create_watchlist(name: str, pairs: list) -> None:
 # ---------------------------------------------------------------------------
 
 def _cib_style(color: str, direction: str) -> str:
-    """Colour a CIB row by breach direction: closed above prev High = green,
-    closed below prev Low = red."""
-    base = {"green": "bold green", "red": "bold red", "neutral": "bold yellow"}
-    if direction == "up":
-        return base["green"]
-    if direction == "down":
-        return base["red"]
-    return base.get(color, "")
+    """Colour a CIB row by the candle's own colour (matches the Candle column):
+    green close => green text, red close => red text; direction only picks the
+    arrow glyph, never the colour."""
+    return COLOR_MAP.get(color, "")
 
 
 def _signal_tables(plans: list) -> tuple[list, list]:
@@ -87,7 +83,7 @@ def _render_tables(target: Console, inside_rows: list, cib_rows: list) -> None:
 
 
 def _build_inside_table(rows: list) -> Table:
-    table = Table(title="🟩🟥 INSIDE DAY — Breakout Levels", box=box.DOUBLE_EDGE)
+    table = Table(title="INSIDE DAY - BREAKOUT LEVELS", box=box.DOUBLE_EDGE)
     table.add_column("Pair", style="cyan")
     table.add_column("Date")
     table.add_column("Candle")
@@ -110,30 +106,21 @@ def _build_inside_table(rows: list) -> Table:
 
 
 def _build_cib_table(rows: list) -> Table:
-    table = Table(title="🟢🔴 CLOSED IN BREAKOUT (CIB) — Close vs Prev Day H/L",
-                  box=box.DOUBLE_EDGE)
+    table = Table(title="CLOSED IN BREAKOUT (CIB)", box=box.DOUBLE_EDGE)
     table.add_column("Pair", style="cyan")
     table.add_column("Date")
     table.add_column("Candle")
     table.add_column("Close")
-    table.add_column("Prev High")
-    table.add_column("Prev Low")
-    table.add_column("Breach")
+    table.add_column("Direction")
 
     for pair, bo in rows:
-        arrow = "↑" if bo["direction"] == "up" else "↓"
-        if bo["direction"] == "up":
-            breach = f"Close {bo['close']:.5f} > Prev High {bo['prev_high']:.5f}"
-        else:
-            breach = f"Close {bo['close']:.5f} < Prev Low {bo['prev_low']:.5f}"
+        arrow = "Above Prev High" if bo["direction"] == "up" else "Below Prev Low"
         table.add_row(
             pair,
             bo["date"].strftime("%Y-%m-%d"),
             bo["color"],
             f"{bo['close']:.5f}",
-            f"{bo['prev_high']:.5f}",
-            f"{bo['prev_low']:.5f}",
-            f"{arrow} {breach}",
+            arrow,
             style=_cib_style(bo["color"], bo["direction"]),
         )
     return table

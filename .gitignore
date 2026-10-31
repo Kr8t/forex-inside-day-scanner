@@ -1,9 +1,1 @@
-__pycache__/
-*.pyc
-.pytest_cache/
-.ruff_cache/
-forex.db
-*.db-wal
-*.db-shm
-.venv/
-venv/
+*.patch

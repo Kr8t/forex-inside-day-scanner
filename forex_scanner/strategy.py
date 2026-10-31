@@ -79,13 +79,20 @@ blackout_direction = cib_direction
 
 
 def find_inside_day(bars: pd.DataFrame, lookback_sessions: int):
-    """Return (candle_pos, mother_pos) of the newest inside day, or None."""
-    n = min(lookback_sessions, len(bars) - 1)
-    for offset in range(1, 1 + n):  # newest first
-        candle = bars.iloc[-offset]
-        mother = bars.iloc[-offset - 1]
-        if is_inside_day(candle, mother):
-            return -offset, -offset - 1
+    """Return (candle_pos, mother_pos) of the newest *actionable* inside day.
+
+    Only a coil on the most recent completed session (offset 1) can be traded
+    with fresh stop levels this week; older coils are historical and their
+    breakout levels have likely already been triggered.  ``lookback_sessions``
+    therefore caps how far back we bother checking, but setups older than the
+    latest bar are never returned as plans.
+    """
+    if len(bars) < MIN_ROWS_FOR_ANALYSIS:
+        return None
+    candle = bars.iloc[-1]
+    mother = bars.iloc[-2]
+    if lookback_sessions >= 1 and is_inside_day(candle, mother):
+        return -1, -2
     return None
 
 

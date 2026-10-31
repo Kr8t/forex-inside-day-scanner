@@ -33,14 +33,23 @@ It is the *close* that matters — a wick that pokes beyond yesterday but snaps
 back to close inside the prior range is **not** a CIB, and a close exactly AT
 the previous High/Low does not count either (it must finish beyond).
 
-The scanner shows CIB rows in their own grid: green ↑ when the close finished
-above the prior day's High, red ↓ when below the prior day's Low.
+The scanner shows CIB rows in their own grid, coloured by the candle itself:
+green text when the day closed up (Close > Open), red text when it closed down.
+The Direction column states whether the close finished above the prior day's
+High or below its Low.
+
+### Inside-day staleness rule
+
+Only an inside day on the **most recent completed session** is reported as a
+tradeable plan. A coil from an earlier day has already had its breakout window
+pass — its stop levels are historical, not actionable — so it is never shown.
 
 ### CIB filter flags
 
 The scanner always *reports* CIB sessions on the latest completed day. When
-the filter is enabled it also *suppresses* older inside-day setups once the
-newest day has already resolved out of the prior range (the coil is stale):
+the filter is enabled it also *suppresses* an inside-day setup if that same
+latest bar both coiled and closed beyond the previous range (the breakout has
+already happened):
 
 ```bash
 python forex_scanner.py scan --cib-filter       # force filter ON

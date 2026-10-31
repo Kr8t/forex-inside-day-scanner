@@ -118,9 +118,12 @@ def test_cib_grid_has_no_signal_column_or_stop_labels(capsys):
     assert "Sell Stop" not in out
 
 
-def test_cib_direction_colours_green_up_red_down():
-    assert cli._cib_style("red", "up") == "bold green"    # breach above -> green
-    assert cli._cib_style("green", "down") == "bold red"  # breach below -> red
+def test_cib_direction_colours_follow_candle_colour():
+    # Colour always matches the candle column: green close => green text.
+    assert cli._cib_style("green", "up") == "green"
+    assert cli._cib_style("red", "down") == "red"
+    assert cli._cib_style("red", "up") == "red"     # direction never flips colour
+    assert cli._cib_style("neutral", "up") == "yellow"
 
 
 def test_print_daily_plan_empty_message(capsys):
@@ -129,7 +132,7 @@ def test_print_daily_plan_empty_message(capsys):
     assert "No Inside-Day or Closed-in-Breakout (CIB) setups" in out
 
 
-def test_cib_breach_text_shows_close_vs_prev_extreme():
+def test_cib_grid_shows_direction_words_not_prices(capsys):
     from io import StringIO
 
     from rich.console import Console
@@ -138,8 +141,18 @@ def test_cib_breach_text_shows_close_vs_prev_extreme():
     target = Console(file=buf, width=140)
     target.print(cli._build_cib_table(cib))
     out = buf.getvalue().replace("\n", "")
-    assert "Close 1.11000 > Prev High 1.10000" in out
-    assert "Close 1.11000 < Prev Low 1.00000" in out
+    assert "Above Prev High" in out
+    assert "Below Prev Low" in out
+    # Removed per user request: no Breach column, and Prev High/Low are no
+    # longer standalone columns (they only appear inside the Direction text).
+    assert "Breach" not in out
+
+
+def test_headings_have_no_icons(capsys):
+    cli.print_daily_plan([_inside_plan(), _cib_plan()])
+    out = capsys.readouterr().out
+    for glyph in ("🟢", "🔴", "🟩", "🟥"):
+        assert glyph not in out
 
 
 def test_scan_flag_names_are_cib():

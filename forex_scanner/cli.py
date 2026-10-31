@@ -53,7 +53,8 @@ def create_watchlist(name: str, pairs: list) -> None:
 # ---------------------------------------------------------------------------
 
 def _cib_style(color: str, direction: str) -> str:
-    """Colour a CIB row by breach direction: closing above = green, below = red."""
+    """Colour a CIB row by breach direction: closed above prev High = green,
+    closed below prev Low = red."""
     base = {"green": "bold green", "red": "bold red", "neutral": "bold yellow"}
     if direction == "up":
         return base["green"]
@@ -68,8 +69,8 @@ def _signal_tables(plans: list) -> tuple[list, list]:
     for p in plans:
         if p.get("inside_day"):
             inside_rows.append((p["pair"], p["inside_day"]))
-        if p.get("blackout"):
-            cib_rows.append((p["pair"], p["blackout"]))
+        if p.get("cib") or p.get("blackout"):
+            cib_rows.append((p["pair"], p.get("cib") or p["blackout"]))
     return inside_rows, cib_rows
 
 
@@ -109,7 +110,8 @@ def _build_inside_table(rows: list) -> Table:
 
 
 def _build_cib_table(rows: list) -> Table:
-    table = Table(title="⚫ CLOSED IN BREAKOUT (CIB)", box=box.DOUBLE_EDGE)
+    table = Table(title="🟢🔴 CLOSED IN BREAKOUT (CIB) — Close vs Prev Day H/L",
+                  box=box.DOUBLE_EDGE)
     table.add_column("Pair", style="cyan")
     table.add_column("Date")
     table.add_column("Candle")
@@ -121,9 +123,9 @@ def _build_cib_table(rows: list) -> Table:
     for pair, bo in rows:
         arrow = "↑" if bo["direction"] == "up" else "↓"
         if bo["direction"] == "up":
-            breach = f"C {bo['close']:.5f} > H {bo['prev_high']:.5f}"
+            breach = f"Close {bo['close']:.5f} > Prev High {bo['prev_high']:.5f}"
         else:
-            breach = f"C {bo['close']:.5f} < L {bo['prev_low']:.5f}"
+            breach = f"Close {bo['close']:.5f} < Prev Low {bo['prev_low']:.5f}"
         table.add_row(
             pair,
             bo["date"].strftime("%Y-%m-%d"),
@@ -145,7 +147,7 @@ def print_daily_plan(plans: list) -> None:
     """
     inside_rows, cib_rows = _signal_tables(plans)
     if not inside_rows and not cib_rows:
-        console.print("[bold yellow]No Inside-Day or Closed-in-Breakout setups "
+        console.print("[bold yellow]No Inside-Day or Closed-in-Breakout (CIB) setups "
                       "found for today's plan.[/bold yellow]\n")
         return
 
@@ -165,13 +167,13 @@ def print_daily_plan(plans: list) -> None:
 # Commands
 # ---------------------------------------------------------------------------
 
-def run_scan(pairs: list, force: bool, blackout_filter: bool | None = None) -> int:
+def run_scan(pairs: list, force: bool, cib_filter: bool | None = None) -> int:
     """Scan pairs; returns an exit code (0 ok, 1 total fetch failure).
 
-    ``blackout_filter`` overrides the configured default for the
-    Closed-in-Blackout filter when not None.
+    ``cib_filter`` overrides the configured default for the
+    Closed-in-Breakout (CIB) filter when not None.
     """
-    kwargs = {} if blackout_filter is None else {"apply_blackout_filter": blackout_filter}
+    kwargs = {} if cib_filter is None else {"apply_cib_filter": cib_filter}
     data = fetch_all(pairs, force=force)
     daily_plans = []
     failed = []
@@ -189,9 +191,9 @@ def run_scan(pairs: list, force: bool, blackout_filter: bool | None = None) -> i
 
     scanned = len(pairs) - len(failed)
     n_inside = sum(1 for p in daily_plans if p.get("inside_day"))
-    n_blackout = sum(1 for p in daily_plans if p.get("blackout"))
+    n_cib = sum(1 for p in daily_plans if p.get("cib"))
     summary = (f"Scanned {scanned}/{len(pairs)} pairs — "
-               f"{n_inside} inside-day setup(s), {n_blackout} closed-in-breakout (CIB).")
+               f"{n_inside} inside-day setup(s), {n_cib} CIB (closed beyond prev day High/Low).")
     if failed:
         summary += f" Fetch failed for: {', '.join(failed)}"
         console.print(f"[bold red]{summary}[/bold red]")
@@ -216,7 +218,7 @@ def cmd_scan(args) -> int:
             "crosses": YEN_EUR_CROSSES,
             "all": ALL_PAIRS,
         }[args.set]
-    return run_scan(pairs, force=args.force, blackout_filter=args.blackout_filter)
+    return run_scan(pairs, force=args.force, cib_filter=args.cib_filter)
 
 
 def cmd_wl(args, wl_parser: argparse.ArgumentParser) -> int:
@@ -269,14 +271,14 @@ def build_parser():
     p_scan.add_argument("--set", choices=["majors", "crosses", "all"], default="all")
     p_scan.add_argument("--watchlist", help="Use a saved watchlist")
     p_scan.add_argument("--force", action="store_true", help="Bypass cache")
-    p_scan.add_argument("--no-blackout-filter", dest="blackout_filter",
+    p_scan.add_argument("--no-cib-filter", dest="cib_filter",
                         action="store_false", default=None,
                         help="Keep inside-day setups even after a "
-                             "closed-in-blackout bar")
-    p_scan.add_argument("--blackout-filter", dest="blackout_filter",
+                             "Closed-in-Breakout (CIB) day")
+    p_scan.add_argument("--cib-filter", dest="cib_filter",
                         action="store_true",
-                        help="Suppress inside-day setups once the latest bar "
-                             "closes outside the previous day's range")
+                        help="Suppress inside-day setups once the latest daily "
+                             "bar closes beyond the previous day's High/Low")
 
     p_wl = sub.add_parser("wl", help="Manage watchlists")
     wlsub = p_wl.add_subparsers(dest="wlcmd")

@@ -6,7 +6,7 @@ colour-coded grid:
 | Grid | Meaning |
 | --- | --- |
 | 🟩🟥 **INSIDE DAY** | A session whose range sits fully inside the previous day's. Rows are coloured by candle direction (green close = green, red close = red) and show the breakout levels (`Breakout ↑ / ↓`). |
-| ⚫ **CLOSED IN BREAKOUT (CIB)** | A session that **closes outside the previous day's high-low range**. Closing *above* the prior high → **green** row (↑); closing *below* the prior low → **red** row (↓). |
+| 🟢🔴 **CLOSED IN BREAKOUT (CIB)** | A daily session whose **closing price ends above the previous day's High or below its Low**. Close *above* prev High → **green** row (↑); close *below* prev Low → **red** row (↓). Wicks beyond but a close back inside do **not** count. |
 
 ## Install & run
 
@@ -25,19 +25,30 @@ pip install .
 forex-scanner scan --set all
 ```
 
+### What is a Closed in Breakout (CIB)?
+
+A pair is flagged **CIB** when its **closing price at the end of the day**
+finishes **above the previous day's High** or **below the previous day's Low**.
+It is the *close* that matters — a wick that pokes beyond yesterday but snaps
+back to close inside the prior range is **not** a CIB, and a close exactly AT
+the previous High/Low does not count either (it must finish beyond).
+
+The scanner shows CIB rows in their own grid: green ↑ when the close finished
+above the prior day's High, red ↓ when below the prior day's Low.
+
 ### CIB filter flags
 
-The scanner always *reports* closed-in-breakout bars on the latest completed
-session. When the filter is enabled it also *suppresses* older inside-day
-setups once the newest bar has already resolved out of the prior range (the
-coil is stale):
+The scanner always *reports* CIB sessions on the latest completed day. When
+the filter is enabled it also *suppresses* older inside-day setups once the
+newest day has already resolved out of the prior range (the coil is stale):
 
 ```bash
-python forex_scanner.py scan --blackout-filter      # force filter ON
-python forex_scanner.py scan --no-blackout-filter   # force filter OFF
+python forex_scanner.py scan --cib-filter       # force filter ON
+python forex_scanner.py scan --no-cib-filter    # force filter OFF
 ```
 
-If neither flag is given, the default comes from `FOREX_BLACKOUT_ENABLED`.
+If neither flag is given, the default comes from `FOREX_CIB_ENABLED`
+(`FOREX_BLACKOUT_ENABLED` still works as a legacy fallback).
 
 ## Configuration (environment variables)
 
@@ -46,14 +57,14 @@ If neither flag is given, the default comes from `FOREX_BLACKOUT_ENABLED`.
 | `FOREX_DB` | `~/.forex-scanner/forex.db` | SQLite cache location |
 | `FOREX_BREAKOUT_BUFFER_PIPS` | `0.0` | Pips beyond the inside-day high/low where stops sit |
 | `FOREX_PLAN_LOOKBACK` | `1` | Completed sessions scanned for an inside day |
-| `FOREX_BLACKOUT_ENABLED` | `1` | Apply the CIB filter by default (`0` disables) |
-| `FOREX_BLACKOUT_BUFFER_PIPS` | `0.0` | Extra pips the close must clear the prior range by before the CIB flag triggers |
+| `FOREX_CIB_ENABLED` | `1` | Apply the CIB filter by default (`0` disables); legacy alias `FOREX_BLACKOUT_ENABLED` |
+| `FOREX_CIB_BUFFER_PIPS` | `0.0` | Extra pips the close must clear the previous day's High/Low by before the CIB flag triggers; legacy alias `FOREX_BLACKOUT_BUFFER_PIPS` |
 
-Example: require a 10-pip clearance beyond the previous day's range before a
-close counts as CIB, and keep older coils visible:
+Example: require a 10-pip clearance beyond the previous day's High/Low before
+a close counts as CIB, and keep older coils visible:
 
 ```bash
-FOREX_BLACKOUT_BUFFER_PIPS=10 FOREX_BLACKOUT_ENABLED=0 \
+FOREX_CIB_BUFFER_PIPS=10 FOREX_CIB_ENABLED=0 \
     python forex_scanner.py scan --set all
 ```
 

@@ -1,0 +1,568 @@
+diff --git a/README.md b/README.md
+index 5a355e4..263aec9 100644
+--- a/README.md
++++ b/README.md
+@@ -6,7 +6,7 @@ colour-coded grid:
+ | Grid | Meaning |
+ | --- | --- |
+ | 🟩🟥 **INSIDE DAY** | A session whose range sits fully inside the previous day's. Rows are coloured by candle direction (green close = green, red close = red) and show the breakout levels (`Breakout ↑ / ↓`). |
+-| ⚫ **CLOSED IN BREAKOUT (CIB)** | A session that **closes outside the previous day's high-low range**. Closing *above* the prior high → **green** row (↑); closing *below* the prior low → **red** row (↓). |
++| 🟢🔴 **CLOSED IN BREAKOUT (CIB)** | A daily session whose **closing price ends above the previous day's High or below its Low**. Close *above* prev High → **green** row (↑); close *below* prev Low → **red** row (↓). Wicks beyond but a close back inside do **not** count. |
+ 
+ ## Install & run
+ 
+@@ -25,19 +25,30 @@ pip install .
+ forex-scanner scan --set all
+ ```
+ 
++### What is a Closed in Breakout (CIB)?
++
++A pair is flagged **CIB** when its **closing price at the end of the day**
++finishes **above the previous day's High** or **below the previous day's Low**.
++It is the *close* that matters — a wick that pokes beyond yesterday but snaps
++back to close inside the prior range is **not** a CIB, and a close exactly AT
++the previous High/Low does not count either (it must finish beyond).
++
++The scanner shows CIB rows in their own grid: green ↑ when the close finished
++above the prior day's High, red ↓ when below the prior day's Low.
++
+ ### CIB filter flags
+ 
+-The scanner always *reports* closed-in-breakout bars on the latest completed
+-session. When the filter is enabled it also *suppresses* older inside-day
+-setups once the newest bar has already resolved out of the prior range (the
+-coil is stale):
++The scanner always *reports* CIB sessions on the latest completed day. When
++the filter is enabled it also *suppresses* older inside-day setups once the
++newest day has already resolved out of the prior range (the coil is stale):
+ 
+ ```bash
+-python forex_scanner.py scan --blackout-filter      # force filter ON
+-python forex_scanner.py scan --no-blackout-filter   # force filter OFF
++python forex_scanner.py scan --cib-filter       # force filter ON
++python forex_scanner.py scan --no-cib-filter    # force filter OFF
+ ```
+ 
+-If neither flag is given, the default comes from `FOREX_BLACKOUT_ENABLED`.
++If neither flag is given, the default comes from `FOREX_CIB_ENABLED`
++(`FOREX_BLACKOUT_ENABLED` still works as a legacy fallback).
+ 
+ ## Configuration (environment variables)
+ 
+@@ -46,14 +57,14 @@ If neither flag is given, the default comes from `FOREX_BLACKOUT_ENABLED`.
+ | `FOREX_DB` | `~/.forex-scanner/forex.db` | SQLite cache location |
+ | `FOREX_BREAKOUT_BUFFER_PIPS` | `0.0` | Pips beyond the inside-day high/low where stops sit |
+ | `FOREX_PLAN_LOOKBACK` | `1` | Completed sessions scanned for an inside day |
+-| `FOREX_BLACKOUT_ENABLED` | `1` | Apply the CIB filter by default (`0` disables) |
+-| `FOREX_BLACKOUT_BUFFER_PIPS` | `0.0` | Extra pips the close must clear the prior range by before the CIB flag triggers |
++| `FOREX_CIB_ENABLED` | `1` | Apply the CIB filter by default (`0` disables); legacy alias `FOREX_BLACKOUT_ENABLED` |
++| `FOREX_CIB_BUFFER_PIPS` | `0.0` | Extra pips the close must clear the previous day's High/Low by before the CIB flag triggers; legacy alias `FOREX_BLACKOUT_BUFFER_PIPS` |
+ 
+-Example: require a 10-pip clearance beyond the previous day's range before a
+-close counts as CIB, and keep older coils visible:
++Example: require a 10-pip clearance beyond the previous day's High/Low before
++a close counts as CIB, and keep older coils visible:
+ 
+ ```bash
+-FOREX_BLACKOUT_BUFFER_PIPS=10 FOREX_BLACKOUT_ENABLED=0 \
++FOREX_CIB_BUFFER_PIPS=10 FOREX_CIB_ENABLED=0 \
+     python forex_scanner.py scan --set all
+ ```
+ 
+diff --git a/forex_scanner/cli.py b/forex_scanner/cli.py
+index 5f34613..90609df 100644
+--- a/forex_scanner/cli.py
++++ b/forex_scanner/cli.py
+@@ -53,7 +53,8 @@ def create_watchlist(name: str, pairs: list) -> None:
+ # ---------------------------------------------------------------------------
+ 
+ def _cib_style(color: str, direction: str) -> str:
+-    """Colour a CIB row by breach direction: closing above = green, below = red."""
++    """Colour a CIB row by breach direction: closed above prev High = green,
++    closed below prev Low = red."""
+     base = {"green": "bold green", "red": "bold red", "neutral": "bold yellow"}
+     if direction == "up":
+         return base["green"]
+@@ -68,8 +69,8 @@ def _signal_tables(plans: list) -> tuple[list, list]:
+     for p in plans:
+         if p.get("inside_day"):
+             inside_rows.append((p["pair"], p["inside_day"]))
+-        if p.get("blackout"):
+-            cib_rows.append((p["pair"], p["blackout"]))
++        if p.get("cib") or p.get("blackout"):
++            cib_rows.append((p["pair"], p.get("cib") or p["blackout"]))
+     return inside_rows, cib_rows
+ 
+ 
+@@ -109,7 +110,8 @@ def _build_inside_table(rows: list) -> Table:
+ 
+ 
+ def _build_cib_table(rows: list) -> Table:
+-    table = Table(title="⚫ CLOSED IN BREAKOUT (CIB)", box=box.DOUBLE_EDGE)
++    table = Table(title="🟢🔴 CLOSED IN BREAKOUT (CIB) — Close vs Prev Day H/L",
++                  box=box.DOUBLE_EDGE)
+     table.add_column("Pair", style="cyan")
+     table.add_column("Date")
+     table.add_column("Candle")
+@@ -121,9 +123,9 @@ def _build_cib_table(rows: list) -> Table:
+     for pair, bo in rows:
+         arrow = "↑" if bo["direction"] == "up" else "↓"
+         if bo["direction"] == "up":
+-            breach = f"C {bo['close']:.5f} > H {bo['prev_high']:.5f}"
++            breach = f"Close {bo['close']:.5f} > Prev High {bo['prev_high']:.5f}"
+         else:
+-            breach = f"C {bo['close']:.5f} < L {bo['prev_low']:.5f}"
++            breach = f"Close {bo['close']:.5f} < Prev Low {bo['prev_low']:.5f}"
+         table.add_row(
+             pair,
+             bo["date"].strftime("%Y-%m-%d"),
+@@ -145,7 +147,7 @@ def print_daily_plan(plans: list) -> None:
+     """
+     inside_rows, cib_rows = _signal_tables(plans)
+     if not inside_rows and not cib_rows:
+-        console.print("[bold yellow]No Inside-Day or Closed-in-Breakout setups "
++        console.print("[bold yellow]No Inside-Day or Closed-in-Breakout (CIB) setups "
+                       "found for today's plan.[/bold yellow]\n")
+         return
+ 
+@@ -165,13 +167,13 @@ def print_daily_plan(plans: list) -> None:
+ # Commands
+ # ---------------------------------------------------------------------------
+ 
+-def run_scan(pairs: list, force: bool, blackout_filter: bool | None = None) -> int:
++def run_scan(pairs: list, force: bool, cib_filter: bool | None = None) -> int:
+     """Scan pairs; returns an exit code (0 ok, 1 total fetch failure).
+ 
+-    ``blackout_filter`` overrides the configured default for the
+-    Closed-in-Blackout filter when not None.
++    ``cib_filter`` overrides the configured default for the
++    Closed-in-Breakout (CIB) filter when not None.
+     """
+-    kwargs = {} if blackout_filter is None else {"apply_blackout_filter": blackout_filter}
++    kwargs = {} if cib_filter is None else {"apply_cib_filter": cib_filter}
+     data = fetch_all(pairs, force=force)
+     daily_plans = []
+     failed = []
+@@ -189,9 +191,9 @@ def run_scan(pairs: list, force: bool, blackout_filter: bool | None = None) -> i
+ 
+     scanned = len(pairs) - len(failed)
+     n_inside = sum(1 for p in daily_plans if p.get("inside_day"))
+-    n_blackout = sum(1 for p in daily_plans if p.get("blackout"))
++    n_cib = sum(1 for p in daily_plans if p.get("cib"))
+     summary = (f"Scanned {scanned}/{len(pairs)} pairs — "
+-               f"{n_inside} inside-day setup(s), {n_blackout} closed-in-breakout (CIB).")
++               f"{n_inside} inside-day setup(s), {n_cib} CIB (closed beyond prev day High/Low).")
+     if failed:
+         summary += f" Fetch failed for: {', '.join(failed)}"
+         console.print(f"[bold red]{summary}[/bold red]")
+@@ -216,7 +218,7 @@ def cmd_scan(args) -> int:
+             "crosses": YEN_EUR_CROSSES,
+             "all": ALL_PAIRS,
+         }[args.set]
+-    return run_scan(pairs, force=args.force, blackout_filter=args.blackout_filter)
++    return run_scan(pairs, force=args.force, cib_filter=args.cib_filter)
+ 
+ 
+ def cmd_wl(args, wl_parser: argparse.ArgumentParser) -> int:
+@@ -269,14 +271,14 @@ def build_parser():
+     p_scan.add_argument("--set", choices=["majors", "crosses", "all"], default="all")
+     p_scan.add_argument("--watchlist", help="Use a saved watchlist")
+     p_scan.add_argument("--force", action="store_true", help="Bypass cache")
+-    p_scan.add_argument("--no-blackout-filter", dest="blackout_filter",
++    p_scan.add_argument("--no-cib-filter", dest="cib_filter",
+                         action="store_false", default=None,
+                         help="Keep inside-day setups even after a "
+-                             "closed-in-blackout bar")
+-    p_scan.add_argument("--blackout-filter", dest="blackout_filter",
++                             "Closed-in-Breakout (CIB) day")
++    p_scan.add_argument("--cib-filter", dest="cib_filter",
+                         action="store_true",
+-                        help="Suppress inside-day setups once the latest bar "
+-                             "closes outside the previous day's range")
++                        help="Suppress inside-day setups once the latest daily "
++                             "bar closes beyond the previous day's High/Low")
+ 
+     p_wl = sub.add_parser("wl", help="Manage watchlists")
+     wlsub = p_wl.add_subparsers(dest="wlcmd")
+diff --git a/forex_scanner/config.py b/forex_scanner/config.py
+index eccf23a..78fdeea 100644
+--- a/forex_scanner/config.py
++++ b/forex_scanner/config.py
+@@ -28,12 +28,18 @@ BREAKOUT_BUFFER_PIPS = float(os.environ.get("FOREX_BREAKOUT_BUFFER_PIPS", "0.0")
+ # (1 = only the immediately previous session).
+ PLAN_LOOKBACK_SESSIONS = int(os.environ.get("FOREX_PLAN_LOOKBACK", "1"))
+ 
+-# Blackout filter: a candle whose close lands *outside* the previous day's
+-# high-low range signals that price was "blackout" beyond the prior value
+-# area. Set FOREX_BLACKOUT_BUFFER_PIPS to require the close to clear the
+-# prior range by N pips before the flag triggers (0.0 = any breach counts).
+-BLACKOUT_ENABLED = os.environ.get("FOREX_BLACKOUT_ENABLED", "1") not in ("0", "false", "no")
+-BLACKOUT_BUFFER_PIPS = float(os.environ.get("FOREX_BLACKOUT_BUFFER_PIPS", "0.0"))
++# Closed-in-Breakout (CIB) filter: a daily session whose *closing price* ends
++# above the previous day's High, or below the previous day's Low.
++# Optional pip buffer: set FOREX_CIB_BUFFER_PIPS to require the close to clear
++# the prior range by N pips before the CIB flag triggers (0.0 = any breach).
++# Legacy FOREX_BLACKOUT_* env vars are still honoured as fallbacks.
++CIB_ENABLED = os.environ.get(
++    "FOREX_CIB_ENABLED", os.environ.get("FOREX_BLACKOUT_ENABLED", "1")
++) not in ("0", "false", "no")
++CIB_BUFFER_PIPS = float(
++    os.environ.get("FOREX_CIB_BUFFER_PIPS",
++                   os.environ.get("FOREX_BLACKOUT_BUFFER_PIPS", "0.0"))
++)
+ 
+ # Database path: override with FOREX_DB env var; defaults to a stable
+ # per-user location so the tool works from any directory.
+diff --git a/forex_scanner/strategy.py b/forex_scanner/strategy.py
+index 6819774..d56a484 100644
+--- a/forex_scanner/strategy.py
++++ b/forex_scanner/strategy.py
+@@ -1,17 +1,21 @@
+-"""Inside-day detection, closed-in-breakout (CIB) filtering, and daily plan generation.
++"""Inside-day detection, Closed-in-Breakout (CIB) filtering, and daily plans.
+ 
+-Terminology: a session that *closes* outside the previous day's high-low
+-range is called a **Closed in Breakout (CIB)** (historically also "blackout").
+-Internal keys keep the ``blackout`` name for cache/plan compatibility; user
+-- and CLI-facing text uses "Closed in Breakout (CIB)".
++Definition: a session is a **Closed in Breakout (CIB)** when its *closing
++price at the end of the day* finishes above the previous day's High, or
++below the previous day's Low.  (A close merely touching the prior extreme
++does not count; the close must finish beyond it.)
++
++Historical note: this signal was previously labelled "blackout"; internal
++keys still accept the legacy ``blackout`` name for backward compatibility,
++but everything user-facing uses CIB.
+ """
+ 
+ import pandas as pd
+ 
+ from .config import (
+-    BLACKOUT_BUFFER_PIPS,
+-    BLACKOUT_ENABLED,
+     BREAKOUT_BUFFER_PIPS,
++    CIB_BUFFER_PIPS,
++    CIB_ENABLED,
+     MIN_ROWS_FOR_ANALYSIS,
+     PLAN_LOOKBACK_SESSIONS,
+ )
+@@ -50,16 +54,15 @@ def is_inside_day(candle, mother) -> bool:
+     return candle["High"] < mother["High"] and candle["Low"] > mother["Low"]
+ 
+ 
+-def blackout_direction(candle, previous, buffer_pips: float = BLACKOUT_BUFFER_PIPS,
+-                       pip: float = 0.0001) -> str | None:
+-    """Return the direction a candle *closed* beyond the previous day's range.
+-
+-    "Closed in Blackout" filter: the candle's close finishes outside the
+-    previous session's high-low range (above its high or below its low).
+-    ``buffer_pips`` (sized with ``pip``) lets callers require the close to
+-    clear the prior range by N pips before the flag triggers.
++def cib_direction(candle, previous, buffer_pips: float = CIB_BUFFER_PIPS,
++                  pip: float = 0.0001) -> str | None:
++    """Return the direction a daily candle *closed* beyond the previous day.
+ 
+-    Returns "up", "down", or None when the close stayed inside the range.
++    Closed in Breakout (CIB): the candle's closing price finishes above the
++    previous day's High ("up") or below the previous day's Low ("down").
++    A close exactly at — or inside — the prior extremes returns None.
++    ``buffer_pips`` (sized with ``pip``) optionally requires the close to
++    clear the prior High/Low by N pips before the flag triggers.
+     """
+     threshold = buffer_pips * pip
+     if candle["Close"] > previous["High"] + threshold:
+@@ -69,6 +72,10 @@ def blackout_direction(candle, previous, buffer_pips: float = BLACKOUT_BUFFER_PI
+     return None
+ 
+ 
++# Deprecated alias kept so external callers/tests using the old name work.
++blackout_direction = cib_direction
++
++
+ def find_inside_day(bars: pd.DataFrame, lookback_sessions: int):
+     """Return (candle_pos, mother_pos) of the newest inside day, or None."""
+     n = min(lookback_sessions, len(bars) - 1)
+@@ -82,8 +89,9 @@ def find_inside_day(bars: pd.DataFrame, lookback_sessions: int):
+ 
+ def get_daily_plan(pair: str, df: pd.DataFrame,
+                    lookback_sessions: int = PLAN_LOOKBACK_SESSIONS,
+-                   apply_blackout_filter: bool = BLACKOUT_ENABLED) -> dict | None:
+-    """Build a daily plan combining inside-day setups and blackout closes.
++                   apply_cib_filter: bool = CIB_ENABLED,
++                   apply_blackout_filter: bool | None = None) -> dict | None:
++    """Build a daily plan combining inside-day setups and CIB closes.
+ 
+     Two independent signals are evaluated over the most recent *completed*
+     sessions (today's partial bar is excluded by ``completed_bars``):
+@@ -91,16 +99,22 @@ def get_daily_plan(pair: str, df: pd.DataFrame,
+     1. **Inside day** — the newest coil within ``lookback_sessions`` becomes
+        the breakout plan; stop orders sit at the coil high/low plus the
+        configured ``BREAKOUT_BUFFER_PIPS``.
+-    2. **Closed in Blackout** — the latest completed session closed *outside*
+-       the previous session's high-low range. Reported via the ``blackout``
+-       key as a dict (direction/date/color/high/low/range) or None. When
+-       ``apply_blackout_filter`` is True and the latest bar closed in
+-       blackout, any inside-day setup found further back is considered
+-       stale and suppressed (the coil has already been resolved).
++    2. **Closed in Breakout (CIB)** — the latest completed daily session
++       closed above the previous day's High or below its Low. Reported via
++       the ``cib`` key as a dict (direction/date/color/close/prev_high/
++       prev_low/high/low/range) or None. When ``apply_cib_filter`` is True
++       and the latest bar is a CIB, any inside-day setup found further back
++       is considered stale and suppressed (the coil has already resolved).
++
++    ``apply_blackout_filter`` is accepted as a deprecated alias for
++    ``apply_cib_filter``; the plan dict also keeps a mirrored ``blackout``
++    key for backward compatibility.
+ 
+     Returns None only when neither signal is present. Callers must treat
+     empty/short data as fetch failures separately.
+     """
++    if apply_blackout_filter is not None:
++        apply_cib_filter = apply_blackout_filter
+     bars = completed_bars(df)
+     if bars is None or len(bars) < MIN_ROWS_FOR_ANALYSIS:
+         return None
+@@ -108,13 +122,13 @@ def get_daily_plan(pair: str, df: pd.DataFrame,
+     pip = pip_size(pair)
+     buffer = BREAKOUT_BUFFER_PIPS * pip
+ 
+-    # --- Signal 2: Closed-in-Blackout on the latest completed bar ----------
++    # --- Signal 2: Closed in Breakout (CIB) on the latest completed bar ----
+     latest = bars.iloc[-1]
+     previous = bars.iloc[-2]
+-    direction = blackout_direction(latest, previous, pip=pip)
+-    blackout = None
++    direction = cib_direction(latest, previous, pip=pip)
++    cib = None
+     if direction:
+-        blackout = {
++        cib = {
+             "direction": direction,
+             "date": bars.index[-1],
+             "previous_date": bars.index[-2],
+@@ -142,15 +156,17 @@ def get_daily_plan(pair: str, df: pd.DataFrame,
+             "range": round(candle["High"] - candle["Low"], 5),
+         }
+ 
+-    # Blackout filter suppresses stale coils that were already resolved.
+-    if apply_blackout_filter and blackout:
++    # CIB filter suppresses stale coils that were already resolved.
++    if apply_cib_filter and cib:
+         inside = None
+ 
+-    if inside is None and blackout is None:
++    if inside is None and cib is None:
+         return None
+ 
+     return {
+         "pair": pair,
+         "inside_day": inside,
+-        "blackout": blackout,
++        "cib": cib,
++        # Deprecated mirror of the same dict under the old "blackout" name.
++        "blackout": cib,
+     }
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 9b445df..41d038c 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -83,17 +83,17 @@ def _inside_plan():
+                 "color": "green",
+                 "breakout_up": 1.05000, "breakout_down": 1.02000,
+                 "range": 0.03},
+-            "blackout": None}
++            "cib": None}
+ 
+ 
+ def _cib_plan(direction="up", color="green"):
+-    bo = {"direction": direction,
+-          "date": pd.Timestamp("2026-01-08"),
+-          "previous_date": pd.Timestamp("2026-01-07"),
+-          "color": color, "close": 1.11, "prev_high": 1.10, "prev_low": 1.00,
+-          "high": 1.12, "low": 1.05, "range": 0.07}
++    cib = {"direction": direction,
++           "date": pd.Timestamp("2026-01-08"),
++           "previous_date": pd.Timestamp("2026-01-07"),
++           "color": color, "close": 1.11, "prev_high": 1.10, "prev_low": 1.00,
++           "high": 1.12, "low": 1.05, "range": 0.07}
+     return {"pair": "GBPJPY" if direction == "up" else "AUDUSD",
+-            "inside_day": None, "blackout": bo}
++            "inside_day": None, "cib": cib, "blackout": cib}
+ 
+ 
+ def test_signal_tables_splits_into_two_grids():
+@@ -126,4 +126,27 @@ def test_cib_direction_colours_green_up_red_down():
+ def test_print_daily_plan_empty_message(capsys):
+     cli.print_daily_plan([])
+     out = capsys.readouterr().out
+-    assert "No Inside-Day or Closed-in-Breakout setups" in out
++    assert "No Inside-Day or Closed-in-Breakout (CIB) setups" in out
++
++
++def test_cib_breach_text_shows_close_vs_prev_extreme():
++    from io import StringIO
++
++    from rich.console import Console
++    _, cib = cli._signal_tables([_cib_plan("up"), _cib_plan("down", "red")])
++    buf = StringIO()
++    target = Console(file=buf, width=140)
++    target.print(cli._build_cib_table(cib))
++    out = buf.getvalue().replace("\n", "")
++    assert "Close 1.11000 > Prev High 1.10000" in out
++    assert "Close 1.11000 < Prev Low 1.00000" in out
++
++
++def test_scan_flag_names_are_cib():
++    ap, _ = cli.build_parser()
++    args = ap.parse_args(["scan", "--no-cib-filter"])
++    assert args.cib_filter is False
++    args = ap.parse_args(["scan", "--cib-filter"])
++    assert args.cib_filter is True
++    args = ap.parse_args(["scan"])
++    assert args.cib_filter is None
+diff --git a/tests/test_strategy.py b/tests/test_strategy.py
+index 2c4882b..68a1f07 100644
+--- a/tests/test_strategy.py
++++ b/tests/test_strategy.py
+@@ -1,4 +1,4 @@
+-"""Unit tests for inside-day detection, blackout filtering, and plan generation."""
++"""Unit tests for inside-day detection, CIB filtering, and plan generation."""
+ 
+ import pandas as pd
+ 
+@@ -21,7 +21,7 @@ def test_detects_inside_day():
+     assert inside["color"] == "green"
+     assert inside["breakout_up"] == 1.05
+     assert inside["breakout_down"] == 1.02
+-    assert plan["blackout"] is None
++    assert plan["cib"] is None
+ 
+ 
+ def test_no_signal_returns_none():
+@@ -85,62 +85,89 @@ def test_classify_candle():
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# Closed in Blackout filter
++# Closed in Breakout (CIB): close beyond previous day's High or Low
+ # ---------------------------------------------------------------------------
+ 
+-def test_blackout_direction_up_down_none():
++def test_cib_direction_up_down_none():
+     prev = {"High": 1.10, "Low": 1.00}
+-    assert strategy.blackout_direction({"Close": 1.11}, prev) == "up"
+-    assert strategy.blackout_direction({"Close": 0.99}, prev) == "down"
+-    assert strategy.blackout_direction({"Close": 1.10}, prev) is None  # at high, not beyond
+-    assert strategy.blackout_direction({"Close": 1.05}, prev) is None
++    assert strategy.cib_direction({"Close": 1.11}, prev) == "up"     # above prev High
++    assert strategy.cib_direction({"Close": 0.99}, prev) == "down"   # below prev Low
++    assert strategy.cib_direction({"Close": 1.10}, prev) is None     # AT prev High: not beyond
++    assert strategy.cib_direction({"Close": 1.00}, prev) is None     # AT prev Low: not beyond
++    assert strategy.cib_direction({"Close": 1.05}, prev) is None     # inside range
+ 
+ 
+-def test_blackout_direction_respects_buffer():
++def test_cib_direction_respects_buffer():
+     prev = {"High": 1.10, "Low": 1.00}
+     candle = {"Close": 1.1030}
+     # 30-pip breach: triggers with no buffer...
+-    assert strategy.blackout_direction(candle, prev, buffer_pips=0.0) == "up"
++    assert strategy.cib_direction(candle, prev, buffer_pips=0.0) == "up"
+     # ...but not when a 50-pip clearance is required.
+-    assert strategy.blackout_direction(candle, prev, buffer_pips=50.0) is None
++    assert strategy.cib_direction(candle, prev, buffer_pips=50.0) is None
++
++
++def test_legacy_blackout_alias_still_works():
++    prev = {"High": 1.10, "Low": 1.00}
++    assert strategy.blackout_direction({"Close": 1.11}, prev) == "up"
+ 
+ 
+-def test_plan_reports_closed_in_blackout_up():
+-    # Bars: mother, then latest closes above mother's high -> blackout up.
++def test_plan_reports_cib_up():
++    # Latest daily bar CLOSES above the previous day's High -> CIB up.
+     df = make_df([MOTHER, MOTHER, (1.08, 1.12, 1.07, 1.11)])
+     plan = strategy.get_daily_plan("EURUSD", df)
+     assert plan is not None
+     assert plan["inside_day"] is None
+-    bo = plan["blackout"]
+-    assert bo["direction"] == "up"
+-    assert bo["close"] == 1.11
+-    assert bo["prev_high"] == 1.10
+-    assert bo["date"] == df.index[-1]
++    cib = plan["cib"]
++    assert cib["direction"] == "up"
++    assert cib["close"] == 1.11
++    assert cib["prev_high"] == 1.10
++    assert cib["date"] == df.index[-1]
++    # Backward-compatible mirror key.
++    assert plan["blackout"] is cib
+ 
+ 
+-def test_plan_reports_closed_in_blackout_down():
++def test_plan_reports_cib_down():
++    # Latest daily bar CLOSES below the previous day's Low -> CIB down.
+     df = make_df([MOTHER, MOTHER, (1.02, 1.03, 0.97, 0.98)])
+     plan = strategy.get_daily_plan("EURUSD", df)
+     assert plan is not None
+-    assert plan["blackout"]["direction"] == "down"
+-    assert plan["blackout"]["prev_low"] == 1.00
++    assert plan["cib"]["direction"] == "down"
++    assert plan["cib"]["prev_low"] == 1.00
++
++
++def test_wick_beyond_prev_range_but_close_inside_is_not_cib():
++    """A high/low that pokes past yesterday but CLOSES back inside is NOT a CIB."""
++    # Prev day: H 1.10 L 1.00. Today wicks to 1.13 but closes at 1.06.
++    df = make_df([MOTHER, MOTHER, (1.04, 1.13, 1.00, 1.06)])
++    plan = strategy.get_daily_plan("EURUSD", df)
++    assert plan is None  # no inside day, no CIB (close finished inside)
++
++
++def test_close_exactly_at_prev_high_is_not_cib():
++    df = make_df([MOTHER, MOTHER, (1.04, 1.11, 1.03, 1.10)])  # closes AT prev high
++    plan = strategy.get_daily_plan("EURUSD", df)
++    assert plan is None
+ 
+ 
+-def test_blackout_filter_suppresses_stale_coil():
+-    # Older inside day, but the newest bar closed in blackout above it.
++def test_cib_filter_suppresses_stale_coil():
++    # Older inside day, but the newest bar closed in breakout above it.
+     df = make_df([MOTHER, INSIDE, (1.08, 1.12, 1.07, 1.11)])
+     suppressed = strategy.get_daily_plan("EURUSD", df, lookback_sessions=2,
+-                                        apply_blackout_filter=True)
++                                         apply_cib_filter=True)
+     assert suppressed["inside_day"] is None
+-    assert suppressed["blackout"]["direction"] == "up"
+-    # With the filter off, the coil is still reported alongside the blackout.
++    assert suppressed["cib"]["direction"] == "up"
++    # With the filter off, the coil is still reported alongside the CIB.
+     both = strategy.get_daily_plan("EURUSD", df, lookback_sessions=2,
+-                                  apply_blackout_filter=False)
++                                   apply_cib_filter=False)
+     assert both["inside_day"] is not None
+-    assert both["blackout"] is not None
++    assert both["cib"] is not None
++    # Legacy kwarg still honoured.
++    legacy = strategy.get_daily_plan("EURUSD", df, lookback_sessions=2,
++                                     apply_blackout_filter=True)
++    assert legacy["inside_day"] is None
+ 
+ 
+-def test_blackout_ignores_partial_today_bar():
++def test_cib_ignores_partial_today_bar():
+     good = make_df([MOTHER, MOTHER, INSIDE])
+     today = pd.Timestamp.today().normalize()
+     partial = pd.DataFrame(
+@@ -149,6 +176,6 @@ def test_blackout_ignores_partial_today_bar():
+     )
+     df = pd.concat([good, partial])
+     plan = strategy.get_daily_plan("EURUSD", df)
+-    # The partial close above yesterday's high must NOT flag a blackout.
+-    assert plan["blackout"] is None
++    # The partial close above yesterday's high must NOT flag a CIB.
++    assert plan["cib"] is None
+     assert plan["inside_day"] is not None

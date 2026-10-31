@@ -1,0 +1,166 @@
+diff --git a/forex_scanner/cache.py b/forex_scanner/cache.py
+index 97184a7..e5fa4fe 100644
+--- a/forex_scanner/cache.py
++++ b/forex_scanner/cache.py
+@@ -36,6 +36,22 @@ _SCHEMA = """
+     );
+ """
+ 
++# Legacy rows stored 'YYYY-MM-DD HH:MM:SS' by older versions; the partial-bar
++# guard requires midnight stamps, so normalise them on read.
++_DATE_READ_SQL = ("substr(date, 1, 10) AS date, "
++                  "open AS Open, high AS High, low AS Low, "
++                  "close AS Close, volume AS Volume")
++
++
++def _normalise_dates(db_path: Path | None = None) -> None:
++    """One-off migration of legacy intraday-stamped dates to plain dates."""
++    with closing(get_conn(db_path)) as conn, conn:
++        conn.execute(
++            "UPDATE OR IGNORE ohlcv SET date = substr(date, 1, 10) "
++            "WHERE length(date) > 10"
++        )
++        conn.execute("DELETE FROM ohlcv WHERE length(date) > 10")
++
+ 
+ def get_conn(db_path: Path | None = None) -> sqlite3.Connection:
+     """Open a connection to the cache database, creating parent dirs if needed."""
+@@ -49,6 +65,7 @@ def get_conn(db_path: Path | None = None) -> sqlite3.Connection:
+ def init_db(db_path: Path | None = None) -> None:
+     with closing(get_conn(db_path)) as conn, conn:
+         conn.executescript(_SCHEMA)
++    _normalise_dates(db_path)
+ 
+ 
+ def _last_trading_day(today: date | None = None) -> date:
+@@ -69,6 +86,8 @@ def is_cache_fresh(pair: str, db_path: Path | None = None) -> bool:
+ 
+     Staleness is validated against MAX(date) stored in the ohlcv table rather
+     than insertion order, so out-of-order backfills don't corrupt metadata.
++    The date comparison uses substr(date,1,10) so legacy rows stamped with an
++    intraday time component are still handled correctly.
+     """
+     with closing(get_conn(db_path)) as conn:
+         row = conn.execute(
+@@ -79,7 +98,7 @@ def is_cache_fresh(pair: str, db_path: Path | None = None) -> bool:
+         if (datetime.now().timestamp() - row[0]) >= CACHE_TTL_SECONDS:
+             return False
+         max_date = conn.execute(
+-            "SELECT MAX(date) FROM ohlcv WHERE pair=?", (pair,)
++            "SELECT MAX(substr(date, 1, 10)) FROM ohlcv WHERE pair=?", (pair,)
+         ).fetchone()[0]
+     if not max_date:
+         return False
+@@ -97,7 +116,7 @@ def save_ohlcv(pair: str, df: pd.DataFrame, db_path: Path | None = None) -> None
+     records = [
+         (
+             pair,
+-            idx.strftime("%Y-%m-%d"),
++            pd.Timestamp(idx).strftime("%Y-%m-%d"),
+             r["Open"], r["High"], r["Low"], r["Close"],
+             0.0 if pd.isna(r["Volume"]) else float(r["Volume"]),
+         )
+@@ -119,8 +138,7 @@ def save_ohlcv(pair: str, df: pd.DataFrame, db_path: Path | None = None) -> None
+ def load_ohlcv(pair: str, db_path: Path | None = None) -> pd.DataFrame:
+     with closing(get_conn(db_path)) as conn:
+         df = pd.read_sql_query(
+-            "SELECT date, open AS Open, high AS High, low AS Low, "
+-            "close AS Close, volume AS Volume FROM ohlcv "
++            f"SELECT {_DATE_READ_SQL} FROM ohlcv "
+             "WHERE pair=? ORDER BY date",
+             conn,
+             params=(pair,),
+diff --git a/forex_scanner/cli.py b/forex_scanner/cli.py
+index 90609df..c98824d 100644
+--- a/forex_scanner/cli.py
++++ b/forex_scanner/cli.py
+@@ -185,6 +185,23 @@ def run_scan(pairs: list, force: bool, cib_filter: bool | None = None) -> int:
+             continue
+         plan = get_daily_plan(p, df, **kwargs)
+         if plan:
++            # Audit trail: show the exact bars each signal was computed from
++            # so a questionable flag can be checked against your chart.
++            bo = plan.get("cib") or plan.get("blackout")
++            if bo:
++                arrow = "↑" if bo["direction"] == "up" else "↓"
++                console.print(
++                    f"[dim]{p}: CIB {arrow} on {bo['date']:%Y-%m-%d} — "
++                    f"close {bo['close']:.5f} vs prev day "
++                    f"({bo['previous_date']:%Y-%m-%d}) "
++                    f"H {bo['prev_high']:.5f} / L {bo['prev_low']:.5f}[/dim]"
++                )
++            if plan.get("inside_day"):
++                idy = plan["inside_day"]
++                console.print(
++                    f"[dim]{p}: inside day {idy['inside_date']:%Y-%m-%d} "
++                    f"in mother {idy['mother_date']:%Y-%m-%d}[/dim]"
++                )
+             daily_plans.append(plan)
+ 
+     print_daily_plan(daily_plans)
+diff --git a/forex_scanner/config.py b/forex_scanner/config.py
+index 78fdeea..96a1d63 100644
+--- a/forex_scanner/config.py
++++ b/forex_scanner/config.py
+@@ -17,7 +17,10 @@ YEN_EUR_CROSSES = [
+ ALL_PAIRS = MAJOR_PAIRS + YEN_EUR_CROSSES
+ 
+ # Cache freshness: data older than this is re-fetched.
+-CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
++# Keep this short (default 15 min): the "last trading day" check alone can be
++# satisfied by a stale intraday bar that yfinance stamps with today's date, so
++# wall-clock TTL is what guarantees we re-pull after the daily close settles.
++CACHE_TTL_SECONDS = float(os.environ.get("FOREX_CACHE_TTL_SECONDS", str(15 * 60)))
+ LOOKBACK_DAYS = 60
+ 
+ # Extra distance (in pips) beyond the inside-day high/low where
+diff --git a/forex_scanner/data.py b/forex_scanner/data.py
+index ba783ba..57e4dc0 100644
+--- a/forex_scanner/data.py
++++ b/forex_scanner/data.py
+@@ -20,7 +20,7 @@ def to_ticker(pair: str) -> str:
+ 
+ 
+ def _clean(df: pd.DataFrame) -> pd.DataFrame:
+-    """Normalise an OHLCV frame: plain OHLC(V) columns, naive index, no NaNs."""
++    """Normalise an OHLCV frame: plain OHLC(V) columns, naive date index, no NaNs."""
+     df = df.copy()
+     if isinstance(df.columns, pd.MultiIndex):
+         # Newer yfinance returns (Price, Ticker) levels; keep the price field.
+@@ -37,7 +37,15 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
+     df = df[["Open", "High", "Low", "Close", "Volume"]]
+     if getattr(df.index, "tz", None) is not None:
+         df.index = df.index.tz_localize(None)
+-    return df.dropna(subset=["Open", "High", "Low", "Close"])
++    # Daily bars must be stamped at midnight. Yahoo intraday feeds sometimes
++    # return timestamps with a session time component; normalising keeps the
++    # "is this today's partial bar?" guard in strategy.completed_bars working.
++    try:
++        df.index = df.index.normalize()
++    except (AttributeError, TypeError, ValueError):
++        pass
++    df = df[~df.index.duplicated(keep="last")]
++    return df.dropna(subset=["Open", "High", "Low", "Close"]).sort_index()
+ 
+ 
+ def _download_with_retry(tickers: list, period: str) -> pd.DataFrame:
+diff --git a/forex_scanner/strategy.py b/forex_scanner/strategy.py
+index d56a484..0d2f5e1 100644
+--- a/forex_scanner/strategy.py
++++ b/forex_scanner/strategy.py
+@@ -40,11 +40,13 @@ def completed_bars(df: pd.DataFrame) -> pd.DataFrame:
+     yfinance returns the current (partial) session as the last row of the
+     1d series; including it corrupts inside-day/CIB detection. A bar counts
+     as partial when its date equals today (local). We conservatively treat
+-    any bar dated today as incomplete.
++    any bar dated today as incomplete. Timestamps carrying a time component
++    are compared by calendar day so intraday-stamped rows can't sneak past
++    the guard.
+     """
+     if df is None or df.empty:
+         return df
+-    last = df.index[-1].normalize()
++    last = pd.Timestamp(df.index[-1]).normalize()
+     if last == pd.Timestamp.today().normalize():
+         return df.iloc[:-1]
+     return df

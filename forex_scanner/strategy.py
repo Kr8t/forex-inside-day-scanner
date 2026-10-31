@@ -1,17 +1,21 @@
-"""Inside-day detection, closed-in-breakout (CIB) filtering, and daily plan generation.
+"""Inside-day detection, Closed-in-Breakout (CIB) filtering, and daily plans.
 
-Terminology: a session that *closes* outside the previous day's high-low
-range is called a **Closed in Breakout (CIB)** (historically also "blackout").
-Internal keys keep the ``blackout`` name for cache/plan compatibility; user
-- and CLI-facing text uses "Closed in Breakout (CIB)".
+Definition: a session is a **Closed in Breakout (CIB)** when its *closing
+price at the end of the day* finishes above the previous day's High, or
+below the previous day's Low.  (A close merely touching the prior extreme
+does not count; the close must finish beyond it.)
+
+Historical note: this signal was previously labelled "blackout"; internal
+keys still accept the legacy ``blackout`` name for backward compatibility,
+but everything user-facing uses CIB.
 """
 
 import pandas as pd
 
 from .config import (
-    BLACKOUT_BUFFER_PIPS,
-    BLACKOUT_ENABLED,
     BREAKOUT_BUFFER_PIPS,
+    CIB_BUFFER_PIPS,
+    CIB_ENABLED,
     MIN_ROWS_FOR_ANALYSIS,
     PLAN_LOOKBACK_SESSIONS,
 )
@@ -50,16 +54,15 @@ def is_inside_day(candle, mother) -> bool:
     return candle["High"] < mother["High"] and candle["Low"] > mother["Low"]
 
 
-def blackout_direction(candle, previous, buffer_pips: float = BLACKOUT_BUFFER_PIPS,
-                       pip: float = 0.0001) -> str | None:
-    """Return the direction a candle *closed* beyond the previous day's range.
+def cib_direction(candle, previous, buffer_pips: float = CIB_BUFFER_PIPS,
+                  pip: float = 0.0001) -> str | None:
+    """Return the direction a daily candle *closed* beyond the previous day.
 
-    "Closed in Blackout" filter: the candle's close finishes outside the
-    previous session's high-low range (above its high or below its low).
-    ``buffer_pips`` (sized with ``pip``) lets callers require the close to
-    clear the prior range by N pips before the flag triggers.
-
-    Returns "up", "down", or None when the close stayed inside the range.
+    Closed in Breakout (CIB): the candle's closing price finishes above the
+    previous day's High ("up") or below the previous day's Low ("down").
+    A close exactly at — or inside — the prior extremes returns None.
+    ``buffer_pips`` (sized with ``pip``) optionally requires the close to
+    clear the prior High/Low by N pips before the flag triggers.
     """
     threshold = buffer_pips * pip
     if candle["Close"] > previous["High"] + threshold:
@@ -67,6 +70,10 @@ def blackout_direction(candle, previous, buffer_pips: float = BLACKOUT_BUFFER_PI
     if candle["Close"] < previous["Low"] - threshold:
         return "down"
     return None
+
+
+# Deprecated alias kept so external callers/tests using the old name work.
+blackout_direction = cib_direction
 
 
 def find_inside_day(bars: pd.DataFrame, lookback_sessions: int):
@@ -82,8 +89,9 @@ def find_inside_day(bars: pd.DataFrame, lookback_sessions: int):
 
 def get_daily_plan(pair: str, df: pd.DataFrame,
                    lookback_sessions: int = PLAN_LOOKBACK_SESSIONS,
-                   apply_blackout_filter: bool = BLACKOUT_ENABLED) -> dict | None:
-    """Build a daily plan combining inside-day setups and blackout closes.
+                   apply_cib_filter: bool = CIB_ENABLED,
+                   apply_blackout_filter: bool | None = None) -> dict | None:
+    """Build a daily plan combining inside-day setups and CIB closes.
 
     Two independent signals are evaluated over the most recent *completed*
     sessions (today's partial bar is excluded by ``completed_bars``):
@@ -91,16 +99,22 @@ def get_daily_plan(pair: str, df: pd.DataFrame,
     1. **Inside day** — the newest coil within ``lookback_sessions`` becomes
        the breakout plan; stop orders sit at the coil high/low plus the
        configured ``BREAKOUT_BUFFER_PIPS``.
-    2. **Closed in Blackout** — the latest completed session closed *outside*
-       the previous session's high-low range. Reported via the ``blackout``
-       key as a dict (direction/date/color/high/low/range) or None. When
-       ``apply_blackout_filter`` is True and the latest bar closed in
-       blackout, any inside-day setup found further back is considered
-       stale and suppressed (the coil has already been resolved).
+    2. **Closed in Breakout (CIB)** — the latest completed daily session
+       closed above the previous day's High or below its Low. Reported via
+       the ``cib`` key as a dict (direction/date/color/close/prev_high/
+       prev_low/high/low/range) or None. When ``apply_cib_filter`` is True
+       and the latest bar is a CIB, any inside-day setup found further back
+       is considered stale and suppressed (the coil has already resolved).
+
+    ``apply_blackout_filter`` is accepted as a deprecated alias for
+    ``apply_cib_filter``; the plan dict also keeps a mirrored ``blackout``
+    key for backward compatibility.
 
     Returns None only when neither signal is present. Callers must treat
     empty/short data as fetch failures separately.
     """
+    if apply_blackout_filter is not None:
+        apply_cib_filter = apply_blackout_filter
     bars = completed_bars(df)
     if bars is None or len(bars) < MIN_ROWS_FOR_ANALYSIS:
         return None
@@ -108,13 +122,13 @@ def get_daily_plan(pair: str, df: pd.DataFrame,
     pip = pip_size(pair)
     buffer = BREAKOUT_BUFFER_PIPS * pip
 
-    # --- Signal 2: Closed-in-Blackout on the latest completed bar ----------
+    # --- Signal 2: Closed in Breakout (CIB) on the latest completed bar ----
     latest = bars.iloc[-1]
     previous = bars.iloc[-2]
-    direction = blackout_direction(latest, previous, pip=pip)
-    blackout = None
+    direction = cib_direction(latest, previous, pip=pip)
+    cib = None
     if direction:
-        blackout = {
+        cib = {
             "direction": direction,
             "date": bars.index[-1],
             "previous_date": bars.index[-2],
@@ -142,15 +156,17 @@ def get_daily_plan(pair: str, df: pd.DataFrame,
             "range": round(candle["High"] - candle["Low"], 5),
         }
 
-    # Blackout filter suppresses stale coils that were already resolved.
-    if apply_blackout_filter and blackout:
+    # CIB filter suppresses stale coils that were already resolved.
+    if apply_cib_filter and cib:
         inside = None
 
-    if inside is None and blackout is None:
+    if inside is None and cib is None:
         return None
 
     return {
         "pair": pair,
         "inside_day": inside,
-        "blackout": blackout,
+        "cib": cib,
+        # Deprecated mirror of the same dict under the old "blackout" name.
+        "blackout": cib,
     }

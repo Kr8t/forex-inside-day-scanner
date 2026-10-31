@@ -36,6 +36,22 @@ _SCHEMA = """
     );
 """
 
+# Legacy rows stored 'YYYY-MM-DD HH:MM:SS' by older versions; the partial-bar
+# guard requires midnight stamps, so normalise them on read.
+_DATE_READ_SQL = ("substr(date, 1, 10) AS date, "
+                  "open AS Open, high AS High, low AS Low, "
+                  "close AS Close, volume AS Volume")
+
+
+def _normalise_dates(db_path: Path | None = None) -> None:
+    """One-off migration of legacy intraday-stamped dates to plain dates."""
+    with closing(get_conn(db_path)) as conn, conn:
+        conn.execute(
+            "UPDATE OR IGNORE ohlcv SET date = substr(date, 1, 10) "
+            "WHERE length(date) > 10"
+        )
+        conn.execute("DELETE FROM ohlcv WHERE length(date) > 10")
+
 
 def get_conn(db_path: Path | None = None) -> sqlite3.Connection:
     """Open a connection to the cache database, creating parent dirs if needed."""
@@ -49,6 +65,7 @@ def get_conn(db_path: Path | None = None) -> sqlite3.Connection:
 def init_db(db_path: Path | None = None) -> None:
     with closing(get_conn(db_path)) as conn, conn:
         conn.executescript(_SCHEMA)
+    _normalise_dates(db_path)
 
 
 def _last_trading_day(today: date | None = None) -> date:
@@ -69,6 +86,8 @@ def is_cache_fresh(pair: str, db_path: Path | None = None) -> bool:
 
     Staleness is validated against MAX(date) stored in the ohlcv table rather
     than insertion order, so out-of-order backfills don't corrupt metadata.
+    The date comparison uses substr(date,1,10) so legacy rows stamped with an
+    intraday time component are still handled correctly.
     """
     with closing(get_conn(db_path)) as conn:
         row = conn.execute(
@@ -79,7 +98,7 @@ def is_cache_fresh(pair: str, db_path: Path | None = None) -> bool:
         if (datetime.now().timestamp() - row[0]) >= CACHE_TTL_SECONDS:
             return False
         max_date = conn.execute(
-            "SELECT MAX(date) FROM ohlcv WHERE pair=?", (pair,)
+            "SELECT MAX(substr(date, 1, 10)) FROM ohlcv WHERE pair=?", (pair,)
         ).fetchone()[0]
     if not max_date:
         return False
@@ -97,7 +116,7 @@ def save_ohlcv(pair: str, df: pd.DataFrame, db_path: Path | None = None) -> None
     records = [
         (
             pair,
-            idx.strftime("%Y-%m-%d"),
+            pd.Timestamp(idx).strftime("%Y-%m-%d"),
             r["Open"], r["High"], r["Low"], r["Close"],
             0.0 if pd.isna(r["Volume"]) else float(r["Volume"]),
         )
@@ -119,8 +138,7 @@ def save_ohlcv(pair: str, df: pd.DataFrame, db_path: Path | None = None) -> None
 def load_ohlcv(pair: str, db_path: Path | None = None) -> pd.DataFrame:
     with closing(get_conn(db_path)) as conn:
         df = pd.read_sql_query(
-            "SELECT date, open AS Open, high AS High, low AS Low, "
-            "close AS Close, volume AS Volume FROM ohlcv "
+            f"SELECT {_DATE_READ_SQL} FROM ohlcv "
             "WHERE pair=? ORDER BY date",
             conn,
             params=(pair,),

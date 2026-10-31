@@ -80,3 +80,29 @@ def test_watchlist_crud(tmp_db):
     cache.delete_watchlist("mine", tmp_db)
     assert cache.load_watchlist("mine", tmp_db) == []
     assert cache.list_watchlists(tmp_db) == []
+
+
+def test_legacy_intraday_dates_are_normalised(tmp_db):
+    """Old cache rows stamped 'YYYY-MM-DD HH:MM:SS' must load as midnight."""
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(tmp_db)) as conn, conn:
+        conn.execute(
+            "INSERT INTO ohlcv VALUES ('EURUSD','2026-10-29 14:30:00',"
+            "1.11,1.12,1.10,1.115,0)"
+        )
+    cache.init_db(tmp_db)  # triggers the migration
+    df = cache.load_ohlcv("EURUSD", tmp_db)
+    assert df.index[-1] == pd.Timestamp("2026-10-29")
+
+
+def test_save_ohlcv_strips_time_component(tmp_db):
+    idx = pd.to_datetime(["2026-10-27 09:30", "2026-10-28 09:30"])
+    df = pd.DataFrame(
+        {"Open": [1.0, 1.1], "High": [1.2, 1.3], "Low": [0.9, 1.0],
+         "Close": [1.1, 1.2], "Volume": [0.0, 0.0]}, index=idx)
+    cache.save_ohlcv("GBPUSD", df, tmp_db)
+    loaded = cache.load_ohlcv("GBPUSD", tmp_db)
+    assert list(loaded.index) == [pd.Timestamp("2026-10-27"),
+                                  pd.Timestamp("2026-10-28")]

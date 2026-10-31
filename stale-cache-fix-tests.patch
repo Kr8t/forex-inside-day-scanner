@@ -1,0 +1,53 @@
+diff --git a/tests/test_cache.py b/tests/test_cache.py
+index 01a625b..0071060 100644
+--- a/tests/test_cache.py
++++ b/tests/test_cache.py
+@@ -80,3 +80,29 @@ def test_watchlist_crud(tmp_db):
+     cache.delete_watchlist("mine", tmp_db)
+     assert cache.load_watchlist("mine", tmp_db) == []
+     assert cache.list_watchlists(tmp_db) == []
++
++
++def test_legacy_intraday_dates_are_normalised(tmp_db):
++    """Old cache rows stamped 'YYYY-MM-DD HH:MM:SS' must load as midnight."""
++    import sqlite3
++    from contextlib import closing
++
++    with closing(sqlite3.connect(tmp_db)) as conn, conn:
++        conn.execute(
++            "INSERT INTO ohlcv VALUES ('EURUSD','2026-10-29 14:30:00',"
++            "1.11,1.12,1.10,1.115,0)"
++        )
++    cache.init_db(tmp_db)  # triggers the migration
++    df = cache.load_ohlcv("EURUSD", tmp_db)
++    assert df.index[-1] == pd.Timestamp("2026-10-29")
++
++
++def test_save_ohlcv_strips_time_component(tmp_db):
++    idx = pd.to_datetime(["2026-10-27 09:30", "2026-10-28 09:30"])
++    df = pd.DataFrame(
++        {"Open": [1.0, 1.1], "High": [1.2, 1.3], "Low": [0.9, 1.0],
++         "Close": [1.1, 1.2], "Volume": [0.0, 0.0]}, index=idx)
++    cache.save_ohlcv("GBPUSD", df, tmp_db)
++    loaded = cache.load_ohlcv("GBPUSD", tmp_db)
++    assert list(loaded.index) == [pd.Timestamp("2026-10-27"),
++                                  pd.Timestamp("2026-10-28")]
+diff --git a/tests/test_strategy.py b/tests/test_strategy.py
+index 68a1f07..9af0f6d 100644
+--- a/tests/test_strategy.py
++++ b/tests/test_strategy.py
+@@ -179,3 +179,14 @@ def test_cib_ignores_partial_today_bar():
+     # The partial close above yesterday's high must NOT flag a CIB.
+     assert plan["cib"] is None
+     assert plan["inside_day"] is not None
++
++
++def test_completed_bars_handles_time_of_day_timestamps():
++    """Rows carrying a session time (not midnight) dated today are still dropped."""
++    today = pd.Timestamp.today().normalize()
++    idx = [today - pd.Timedelta(days=2), today - pd.Timedelta(days=1),
++           today + pd.Timedelta(hours=14, minutes=30)]
++    df = pd.DataFrame({"Open": [1.0]*3, "High": [1.1]*3, "Low": [0.9]*3,
++                       "Close": [1.05]*3}, index=pd.DatetimeIndex(idx))
++    bars = strategy.completed_bars(df)
++    assert len(bars) == 2

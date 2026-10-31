@@ -40,11 +40,13 @@ def completed_bars(df: pd.DataFrame) -> pd.DataFrame:
     yfinance returns the current (partial) session as the last row of the
     1d series; including it corrupts inside-day/CIB detection. A bar counts
     as partial when its date equals today (local). We conservatively treat
-    any bar dated today as incomplete.
+    any bar dated today as incomplete. Timestamps carrying a time component
+    are compared by calendar day so intraday-stamped rows can't sneak past
+    the guard.
     """
     if df is None or df.empty:
         return df
-    last = df.index[-1].normalize()
+    last = pd.Timestamp(df.index[-1]).normalize()
     if last == pd.Timestamp.today().normalize():
         return df.iloc[:-1]
     return df

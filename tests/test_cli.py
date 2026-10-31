@@ -83,17 +83,17 @@ def _inside_plan():
                 "color": "green",
                 "breakout_up": 1.05000, "breakout_down": 1.02000,
                 "range": 0.03},
-            "blackout": None}
+            "cib": None}
 
 
 def _cib_plan(direction="up", color="green"):
-    bo = {"direction": direction,
-          "date": pd.Timestamp("2026-01-08"),
-          "previous_date": pd.Timestamp("2026-01-07"),
-          "color": color, "close": 1.11, "prev_high": 1.10, "prev_low": 1.00,
-          "high": 1.12, "low": 1.05, "range": 0.07}
+    cib = {"direction": direction,
+           "date": pd.Timestamp("2026-01-08"),
+           "previous_date": pd.Timestamp("2026-01-07"),
+           "color": color, "close": 1.11, "prev_high": 1.10, "prev_low": 1.00,
+           "high": 1.12, "low": 1.05, "range": 0.07}
     return {"pair": "GBPJPY" if direction == "up" else "AUDUSD",
-            "inside_day": None, "blackout": bo}
+            "inside_day": None, "cib": cib, "blackout": cib}
 
 
 def test_signal_tables_splits_into_two_grids():
@@ -126,4 +126,27 @@ def test_cib_direction_colours_green_up_red_down():
 def test_print_daily_plan_empty_message(capsys):
     cli.print_daily_plan([])
     out = capsys.readouterr().out
-    assert "No Inside-Day or Closed-in-Breakout setups" in out
+    assert "No Inside-Day or Closed-in-Breakout (CIB) setups" in out
+
+
+def test_cib_breach_text_shows_close_vs_prev_extreme():
+    from io import StringIO
+
+    from rich.console import Console
+    _, cib = cli._signal_tables([_cib_plan("up"), _cib_plan("down", "red")])
+    buf = StringIO()
+    target = Console(file=buf, width=140)
+    target.print(cli._build_cib_table(cib))
+    out = buf.getvalue().replace("\n", "")
+    assert "Close 1.11000 > Prev High 1.10000" in out
+    assert "Close 1.11000 < Prev Low 1.00000" in out
+
+
+def test_scan_flag_names_are_cib():
+    ap, _ = cli.build_parser()
+    args = ap.parse_args(["scan", "--no-cib-filter"])
+    assert args.cib_filter is False
+    args = ap.parse_args(["scan", "--cib-filter"])
+    assert args.cib_filter is True
+    args = ap.parse_args(["scan"])
+    assert args.cib_filter is None

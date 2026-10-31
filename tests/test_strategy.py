@@ -1,4 +1,4 @@
-"""Unit tests for inside-day detection, blackout filtering, and plan generation."""
+"""Unit tests for inside-day detection, CIB filtering, and plan generation."""
 
 import pandas as pd
 
@@ -21,7 +21,7 @@ def test_detects_inside_day():
     assert inside["color"] == "green"
     assert inside["breakout_up"] == 1.05
     assert inside["breakout_down"] == 1.02
-    assert plan["blackout"] is None
+    assert plan["cib"] is None
 
 
 def test_no_signal_returns_none():
@@ -85,62 +85,89 @@ def test_classify_candle():
 
 
 # ---------------------------------------------------------------------------
-# Closed in Blackout filter
+# Closed in Breakout (CIB): close beyond previous day's High or Low
 # ---------------------------------------------------------------------------
 
-def test_blackout_direction_up_down_none():
+def test_cib_direction_up_down_none():
     prev = {"High": 1.10, "Low": 1.00}
-    assert strategy.blackout_direction({"Close": 1.11}, prev) == "up"
-    assert strategy.blackout_direction({"Close": 0.99}, prev) == "down"
-    assert strategy.blackout_direction({"Close": 1.10}, prev) is None  # at high, not beyond
-    assert strategy.blackout_direction({"Close": 1.05}, prev) is None
+    assert strategy.cib_direction({"Close": 1.11}, prev) == "up"     # above prev High
+    assert strategy.cib_direction({"Close": 0.99}, prev) == "down"   # below prev Low
+    assert strategy.cib_direction({"Close": 1.10}, prev) is None     # AT prev High: not beyond
+    assert strategy.cib_direction({"Close": 1.00}, prev) is None     # AT prev Low: not beyond
+    assert strategy.cib_direction({"Close": 1.05}, prev) is None     # inside range
 
 
-def test_blackout_direction_respects_buffer():
+def test_cib_direction_respects_buffer():
     prev = {"High": 1.10, "Low": 1.00}
     candle = {"Close": 1.1030}
     # 30-pip breach: triggers with no buffer...
-    assert strategy.blackout_direction(candle, prev, buffer_pips=0.0) == "up"
+    assert strategy.cib_direction(candle, prev, buffer_pips=0.0) == "up"
     # ...but not when a 50-pip clearance is required.
-    assert strategy.blackout_direction(candle, prev, buffer_pips=50.0) is None
+    assert strategy.cib_direction(candle, prev, buffer_pips=50.0) is None
 
 
-def test_plan_reports_closed_in_blackout_up():
-    # Bars: mother, then latest closes above mother's high -> blackout up.
+def test_legacy_blackout_alias_still_works():
+    prev = {"High": 1.10, "Low": 1.00}
+    assert strategy.blackout_direction({"Close": 1.11}, prev) == "up"
+
+
+def test_plan_reports_cib_up():
+    # Latest daily bar CLOSES above the previous day's High -> CIB up.
     df = make_df([MOTHER, MOTHER, (1.08, 1.12, 1.07, 1.11)])
     plan = strategy.get_daily_plan("EURUSD", df)
     assert plan is not None
     assert plan["inside_day"] is None
-    bo = plan["blackout"]
-    assert bo["direction"] == "up"
-    assert bo["close"] == 1.11
-    assert bo["prev_high"] == 1.10
-    assert bo["date"] == df.index[-1]
+    cib = plan["cib"]
+    assert cib["direction"] == "up"
+    assert cib["close"] == 1.11
+    assert cib["prev_high"] == 1.10
+    assert cib["date"] == df.index[-1]
+    # Backward-compatible mirror key.
+    assert plan["blackout"] is cib
 
 
-def test_plan_reports_closed_in_blackout_down():
+def test_plan_reports_cib_down():
+    # Latest daily bar CLOSES below the previous day's Low -> CIB down.
     df = make_df([MOTHER, MOTHER, (1.02, 1.03, 0.97, 0.98)])
     plan = strategy.get_daily_plan("EURUSD", df)
     assert plan is not None
-    assert plan["blackout"]["direction"] == "down"
-    assert plan["blackout"]["prev_low"] == 1.00
+    assert plan["cib"]["direction"] == "down"
+    assert plan["cib"]["prev_low"] == 1.00
 
 
-def test_blackout_filter_suppresses_stale_coil():
-    # Older inside day, but the newest bar closed in blackout above it.
+def test_wick_beyond_prev_range_but_close_inside_is_not_cib():
+    """A high/low that pokes past yesterday but CLOSES back inside is NOT a CIB."""
+    # Prev day: H 1.10 L 1.00. Today wicks to 1.13 but closes at 1.06.
+    df = make_df([MOTHER, MOTHER, (1.04, 1.13, 1.00, 1.06)])
+    plan = strategy.get_daily_plan("EURUSD", df)
+    assert plan is None  # no inside day, no CIB (close finished inside)
+
+
+def test_close_exactly_at_prev_high_is_not_cib():
+    df = make_df([MOTHER, MOTHER, (1.04, 1.11, 1.03, 1.10)])  # closes AT prev high
+    plan = strategy.get_daily_plan("EURUSD", df)
+    assert plan is None
+
+
+def test_cib_filter_suppresses_stale_coil():
+    # Older inside day, but the newest bar closed in breakout above it.
     df = make_df([MOTHER, INSIDE, (1.08, 1.12, 1.07, 1.11)])
     suppressed = strategy.get_daily_plan("EURUSD", df, lookback_sessions=2,
-                                        apply_blackout_filter=True)
+                                         apply_cib_filter=True)
     assert suppressed["inside_day"] is None
-    assert suppressed["blackout"]["direction"] == "up"
-    # With the filter off, the coil is still reported alongside the blackout.
+    assert suppressed["cib"]["direction"] == "up"
+    # With the filter off, the coil is still reported alongside the CIB.
     both = strategy.get_daily_plan("EURUSD", df, lookback_sessions=2,
-                                  apply_blackout_filter=False)
+                                   apply_cib_filter=False)
     assert both["inside_day"] is not None
-    assert both["blackout"] is not None
+    assert both["cib"] is not None
+    # Legacy kwarg still honoured.
+    legacy = strategy.get_daily_plan("EURUSD", df, lookback_sessions=2,
+                                     apply_blackout_filter=True)
+    assert legacy["inside_day"] is None
 
 
-def test_blackout_ignores_partial_today_bar():
+def test_cib_ignores_partial_today_bar():
     good = make_df([MOTHER, MOTHER, INSIDE])
     today = pd.Timestamp.today().normalize()
     partial = pd.DataFrame(
@@ -149,6 +176,17 @@ def test_blackout_ignores_partial_today_bar():
     )
     df = pd.concat([good, partial])
     plan = strategy.get_daily_plan("EURUSD", df)
-    # The partial close above yesterday's high must NOT flag a blackout.
-    assert plan["blackout"] is None
+    # The partial close above yesterday's high must NOT flag a CIB.
+    assert plan["cib"] is None
     assert plan["inside_day"] is not None
+
+
+def test_completed_bars_handles_time_of_day_timestamps():
+    """Rows carrying a session time (not midnight) dated today are still dropped."""
+    today = pd.Timestamp.today().normalize()
+    idx = [today - pd.Timedelta(days=2), today - pd.Timedelta(days=1),
+           today + pd.Timedelta(hours=14, minutes=30)]
+    df = pd.DataFrame({"Open": [1.0]*3, "High": [1.1]*3, "Low": [0.9]*3,
+                       "Close": [1.05]*3}, index=pd.DatetimeIndex(idx))
+    bars = strategy.completed_bars(df)
+    assert len(bars) == 2

@@ -20,7 +20,7 @@ def to_ticker(pair: str) -> str:
 
 
 def _clean(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalise an OHLCV frame: plain OHLC(V) columns, naive index, no NaNs."""
+    """Normalise an OHLCV frame: plain OHLC(V) columns, naive date index, no NaNs."""
     df = df.copy()
     if isinstance(df.columns, pd.MultiIndex):
         # Newer yfinance returns (Price, Ticker) levels; keep the price field.
@@ -37,7 +37,15 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
     df = df[["Open", "High", "Low", "Close", "Volume"]]
     if getattr(df.index, "tz", None) is not None:
         df.index = df.index.tz_localize(None)
-    return df.dropna(subset=["Open", "High", "Low", "Close"])
+    # Daily bars must be stamped at midnight. Yahoo intraday feeds sometimes
+    # return timestamps with a session time component; normalising keeps the
+    # "is this today's partial bar?" guard in strategy.completed_bars working.
+    try:
+        df.index = df.index.normalize()
+    except (AttributeError, TypeError, ValueError):
+        pass
+    df = df[~df.index.duplicated(keep="last")]
+    return df.dropna(subset=["Open", "High", "Low", "Close"]).sort_index()
 
 
 def _download_with_retry(tickers: list, period: str) -> pd.DataFrame:

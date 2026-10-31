@@ -17,7 +17,10 @@ YEN_EUR_CROSSES = [
 ALL_PAIRS = MAJOR_PAIRS + YEN_EUR_CROSSES
 
 # Cache freshness: data older than this is re-fetched.
-CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
+# Keep this short (default 15 min): the "last trading day" check alone can be
+# satisfied by a stale intraday bar that yfinance stamps with today's date, so
+# wall-clock TTL is what guarantees we re-pull after the daily close settles.
+CACHE_TTL_SECONDS = float(os.environ.get("FOREX_CACHE_TTL_SECONDS", str(15 * 60)))
 LOOKBACK_DAYS = 60
 
 # Extra distance (in pips) beyond the inside-day high/low where

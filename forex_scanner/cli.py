@@ -54,29 +54,51 @@ def create_watchlist(name: str, pairs: list) -> None:
 
 def print_daily_plan(plans: list) -> None:
     if not plans:
-        console.print("[bold yellow]No Inside-Day setups found for today's plan.[/bold yellow]\n")
+        console.print("[bold yellow]No Inside-Day or Blackout setups "
+                      "found for today's plan.[/bold yellow]\n")
         return
 
-    table = Table(title="🎯 TODAY'S PLAN (Based on Previous Day's Inside Day)",
+    table = Table(title="🎯 TODAY'S PLAN (Inside-Day Breakouts & Closed-in-Blackout)",
                   box=box.DOUBLE_EDGE)
     table.add_column("Pair", style="cyan")
-    table.add_column("ID Date")
+    table.add_column("Signal")
+    table.add_column("Date")
     table.add_column("Color")
     table.add_column("Buy Stop (Break ↑)", style="green")
     table.add_column("Sell Stop (Break ↓)", style="red")
     table.add_column("Range (Pips)")
 
     for p in plans:
-        pips = round(p["range"] / pip_size(p["pair"]), 1)
-        table.add_row(
-            p["pair"],
-            p["inside_date"].strftime("%Y-%m-%d"),
-            p["color"],
-            f"{p['breakout_up']:.5f}",
-            f"{p['breakout_down']:.5f}",
-            f"{pips} pips",
-            style=COLOR_MAP[p["color"]],
-        )
+        inside = p.get("inside_day")
+        blackout = p.get("blackout")
+        if inside:
+            pips = round(inside["range"] / pip_size(p["pair"]), 1)
+            table.add_row(
+                p["pair"],
+                "Inside Day",
+                inside["inside_date"].strftime("%Y-%m-%d"),
+                inside["color"],
+                f"{inside['breakout_up']:.5f}",
+                f"{inside['breakout_down']:.5f}",
+                f"{pips} pips",
+                style=COLOR_MAP[inside["color"]],
+            )
+        if blackout:
+            bo = blackout  # dict with direction/date/color/close/prev_high/prev_low/range
+            arrow = "↑" if bo["direction"] == "up" else "↓"
+            pips = round(bo["range"] / pip_size(p["pair"]), 1)
+            table.add_row(
+                p["pair"],
+                f"⚫ Closed in Blackout {arrow}",
+                bo["date"].strftime("%Y-%m-%d"),
+                bo["color"],
+                f"C {bo['close']:.5f} > H {bo['prev_high']:.5f}"
+                if bo["direction"] == "up" else "-",
+                f"C {bo['close']:.5f} < L {bo['prev_low']:.5f}"
+                if bo["direction"] == "down" else "-",
+                f"{pips} pips",
+                style="bold magenta",
+            )
     console.print(table)
     console.print()
 
@@ -85,8 +107,13 @@ def print_daily_plan(plans: list) -> None:
 # Commands
 # ---------------------------------------------------------------------------
 
-def run_scan(pairs: list, force: bool) -> int:
-    """Scan pairs; returns an exit code (0 ok, 1 total fetch failure)."""
+def run_scan(pairs: list, force: bool, blackout_filter: bool | None = None) -> int:
+    """Scan pairs; returns an exit code (0 ok, 1 total fetch failure).
+
+    ``blackout_filter`` overrides the configured default for the
+    Closed-in-Blackout filter when not None.
+    """
+    kwargs = {} if blackout_filter is None else {"apply_blackout_filter": blackout_filter}
     data = fetch_all(pairs, force=force)
     daily_plans = []
     failed = []
@@ -96,14 +123,17 @@ def run_scan(pairs: list, force: bool) -> int:
         if df is None or df.empty:
             failed.append(p)
             continue
-        plan = get_daily_plan(p, df)
+        plan = get_daily_plan(p, df, **kwargs)
         if plan:
             daily_plans.append(plan)
 
     print_daily_plan(daily_plans)
 
     scanned = len(pairs) - len(failed)
-    summary = f"Scanned {scanned}/{len(pairs)} pairs, {len(daily_plans)} setup(s) found."
+    n_inside = sum(1 for p in daily_plans if p.get("inside_day"))
+    n_blackout = sum(1 for p in daily_plans if p.get("blackout"))
+    summary = (f"Scanned {scanned}/{len(pairs)} pairs — "
+               f"{n_inside} inside-day setup(s), {n_blackout} closed-in-blackout.")
     if failed:
         summary += f" Fetch failed for: {', '.join(failed)}"
         console.print(f"[bold red]{summary}[/bold red]")
@@ -128,7 +158,7 @@ def cmd_scan(args) -> int:
             "crosses": YEN_EUR_CROSSES,
             "all": ALL_PAIRS,
         }[args.set]
-    return run_scan(pairs, force=args.force)
+    return run_scan(pairs, force=args.force, blackout_filter=args.blackout_filter)
 
 
 def cmd_wl(args, wl_parser: argparse.ArgumentParser) -> int:
@@ -177,10 +207,18 @@ def build_parser():
     ap.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     sub = ap.add_subparsers(dest="cmd")
 
-    p_scan = sub.add_parser("scan", help="Scan pairs for inside days & breakouts")
+    p_scan = sub.add_parser("scan", help="Scan pairs for inside days & blackout closes")
     p_scan.add_argument("--set", choices=["majors", "crosses", "all"], default="all")
     p_scan.add_argument("--watchlist", help="Use a saved watchlist")
     p_scan.add_argument("--force", action="store_true", help="Bypass cache")
+    p_scan.add_argument("--no-blackout-filter", dest="blackout_filter",
+                        action="store_false", default=None,
+                        help="Keep inside-day setups even after a "
+                             "closed-in-blackout bar")
+    p_scan.add_argument("--blackout-filter", dest="blackout_filter",
+                        action="store_true",
+                        help="Suppress inside-day setups once the latest bar "
+                             "closes outside the previous day's range")
 
     p_wl = sub.add_parser("wl", help="Manage watchlists")
     wlsub = p_wl.add_subparsers(dest="wlcmd")

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "forex-scanner"
 version = "1.0.0"
-description = "Scans major FX pairs for daily inside-day compressions and builds a breakout trading plan."
+description = "Scans major FX pairs for daily inside-day compressions and closed-in-blackout closes, and builds a breakout trading plan."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

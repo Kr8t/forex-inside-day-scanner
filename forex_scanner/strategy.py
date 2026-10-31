@@ -1,4 +1,10 @@
-"""Inside-day detection, blackout filtering, and daily trading-plan generation."""
+"""Inside-day detection, closed-in-breakout (CIB) filtering, and daily plan generation.
+
+Terminology: a session that *closes* outside the previous day's high-low
+range is called a **Closed in Breakout (CIB)** (historically also "blackout").
+Internal keys keep the ``blackout`` name for cache/plan compatibility; user
+- and CLI-facing text uses "Closed in Breakout (CIB)".
+"""
 
 import pandas as pd
 
@@ -28,9 +34,9 @@ def completed_bars(df: pd.DataFrame) -> pd.DataFrame:
     """Drop today's still-forming intraday bar from a daily series.
 
     yfinance returns the current (partial) session as the last row of the
-    1d series; including it corrupts inside-day detection. A bar counts as
-    partial when its date is strictly after the most recent *expected* close.
-    We conservatively treat any bar dated today (local) as incomplete.
+    1d series; including it corrupts inside-day/CIB detection. A bar counts
+    as partial when its date equals today (local). We conservatively treat
+    any bar dated today as incomplete.
     """
     if df is None or df.empty:
         return df

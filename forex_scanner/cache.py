@@ -2,6 +2,10 @@
 
 All functions use context-managed connections so handles are always closed,
 and the database file defaults to a per-user location (see config.DB_PATH).
+
+NOTE: ``DB_PATH`` is read from the environment at import time via config;
+tests that redirect the database must patch this module's ``DB_PATH`` alias
+as well as config's (see tests/conftest.py).
 """
 
 import json
@@ -12,7 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import CACHE_TTL_SECONDS, DB_PATH
+from .config import CACHE_TTL_SECONDS, DB_PATH  # noqa: PLC0414 - re-exported for tests
 
 _SCHEMA = """
     CREATE TABLE IF NOT EXISTS ohlcv (

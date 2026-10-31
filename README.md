@@ -89,3 +89,7 @@ CI runs lint + tests on every push via GitHub Actions
 
 This tool provides technical analysis for educational purposes only. It is
 not financial advice. Trading foreign exchange carries significant risk.
+\Forex Inside-Day Scanner  
+Scans major FX pairs for daily inside-day compressions.  
+\Run python forex_scanner.py scan --set all  
+\Windows Double-click RunScanner.bat  

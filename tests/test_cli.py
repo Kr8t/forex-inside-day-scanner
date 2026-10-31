@@ -49,7 +49,8 @@ def test_run_scan_total_failure_returns_exit_code_1(monkeypatch, capsys):
     monkeypatch.setattr(cli, "fetch_all", lambda pairs, force=False: data)
     rc = cli.run_scan(["EURUSD", "GBPUSD"], force=False)
     assert rc == 1
-    assert "Fetch failed" in capsys.readouterr().out
+    out = capsys.readouterr().out.replace("\n", "")  # rich may soft-wrap lines
+    assert "Fetch failed" in out
 
 
 def test_main_no_args_prints_help(capsys):
@@ -68,3 +69,61 @@ def test_main_wl_bare_subcommand_shows_help(capsys):
     rc = cli.main(["wl"])
     assert rc == 1
     assert "usage" in capsys.readouterr().out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Split-grid output (Inside Day grid + Closed in Breakout (CIB) grid)
+# ---------------------------------------------------------------------------
+
+def _inside_plan():
+    return {"pair": "EURUSD",
+            "inside_day": {
+                "inside_date": pd.Timestamp("2026-01-07"),
+                "mother_date": pd.Timestamp("2026-01-06"),
+                "color": "green",
+                "breakout_up": 1.05000, "breakout_down": 1.02000,
+                "range": 0.03},
+            "blackout": None}
+
+
+def _cib_plan(direction="up", color="green"):
+    bo = {"direction": direction,
+          "date": pd.Timestamp("2026-01-08"),
+          "previous_date": pd.Timestamp("2026-01-07"),
+          "color": color, "close": 1.11, "prev_high": 1.10, "prev_low": 1.00,
+          "high": 1.12, "low": 1.05, "range": 0.07}
+    return {"pair": "GBPJPY" if direction == "up" else "AUDUSD",
+            "inside_day": None, "blackout": bo}
+
+
+def test_signal_tables_splits_into_two_grids():
+    inside, cib = cli._signal_tables([_inside_plan(), _cib_plan()])
+    assert [p for p, _ in inside] == ["EURUSD"]
+    assert [p for p, _ in cib] == ["GBPJPY"]
+
+
+def test_print_daily_plan_renders_both_grids(capsys):
+    cli.print_daily_plan([_inside_plan(), _cib_plan(), _cib_plan("down", "red")])
+    out = capsys.readouterr().out
+    assert "INSIDE DAY" in out
+    assert "CLOSED IN BREAKOUT (CIB)" in out
+    assert "EURUSD" in out and "GBPJPY" in out and "AUDUSD" in out
+
+
+def test_cib_grid_has_no_signal_column_or_stop_labels(capsys):
+    cli.print_daily_plan([_inside_plan(), _cib_plan()])
+    out = capsys.readouterr().out
+    assert "Signal" not in out
+    assert "Buy Stop" not in out
+    assert "Sell Stop" not in out
+
+
+def test_cib_direction_colours_green_up_red_down():
+    assert cli._cib_style("red", "up") == "bold green"    # breach above -> green
+    assert cli._cib_style("green", "down") == "bold red"  # breach below -> red
+
+
+def test_print_daily_plan_empty_message(capsys):
+    cli.print_daily_plan([])
+    out = capsys.readouterr().out
+    assert "No Inside-Day or Closed-in-Breakout setups" in out

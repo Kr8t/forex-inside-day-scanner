@@ -1,35 +1,43 @@
-# Forex Inside-Day & Blackout Scanner
+# Forex Scanner — Inside Day & Closed in Breakout (CIB)
 
-Scans major FX pairs for two daily signals:
+Scans major FX pairs for two daily signals and prints each as its own
+colour-coded grid:
 
-* **Inside Day** — a session whose range is contained within the previous
-  day's, used to build breakout stop-order levels.
-* **Closed in Blackout** — a session that *closes* outside the previous
-  day's high-low range (above its high or below its low).
+| Grid | Meaning |
+| --- | --- |
+| 🟩🟥 **INSIDE DAY** | A session whose range sits fully inside the previous day's. Rows are coloured by candle direction (green close = green, red close = red) and show the breakout levels (`Breakout ↑ / ↓`). |
+| ⚫ **CLOSED IN BREAKOUT (CIB)** | A session that **closes outside the previous day's high-low range**. Closing *above* the prior high → **green** row (↑); closing *below* the prior low → **red** row (↓). |
 
-## Run
+## Install & run
 
 ```bash
-python forex_scanner.py scan --set all           # scan every supported pair
+pip install -r requirements.txt
+python forex_scanner.py scan --set all           # every supported pair
 python forex_scanner.py scan --set majors        # only the 7 majors
 python forex_scanner.py scan --watchlist mylist  # saved watchlist
 python forex_scanner.py scan --force             # bypass the local cache
 ```
 
-### Blackout filter flags
+Or install as a package and use the `forex-scanner` entry point:
 
-The scanner always *reports* closed-in-blackout bars on the latest completed
-session. In addition, when the filter is enabled it also *suppresses* any
-older inside-day setup once the newest bar has already resolved out of the
-prior range (the coil is stale):
+```bash
+pip install .
+forex-scanner scan --set all
+```
+
+### CIB filter flags
+
+The scanner always *reports* closed-in-breakout bars on the latest completed
+session. When the filter is enabled it also *suppresses* older inside-day
+setups once the newest bar has already resolved out of the prior range (the
+coil is stale):
 
 ```bash
 python forex_scanner.py scan --blackout-filter      # force filter ON
 python forex_scanner.py scan --no-blackout-filter   # force filter OFF
 ```
 
-If neither flag is given, the default comes from `FOREX_BLACKOUT_ENABLED`
-(see below).
+If neither flag is given, the default comes from `FOREX_BLACKOUT_ENABLED`.
 
 ## Configuration (environment variables)
 
@@ -38,11 +46,11 @@ If neither flag is given, the default comes from `FOREX_BLACKOUT_ENABLED`
 | `FOREX_DB` | `~/.forex-scanner/forex.db` | SQLite cache location |
 | `FOREX_BREAKOUT_BUFFER_PIPS` | `0.0` | Pips beyond the inside-day high/low where stops sit |
 | `FOREX_PLAN_LOOKBACK` | `1` | Completed sessions scanned for an inside day |
-| `FOREX_BLACKOUT_ENABLED` | `1` | Apply the blackout filter by default (`0` disables) |
-| `FOREX_BLACKOUT_BUFFER_PIPS` | `0.0` | Extra pips the close must clear the prior range by before the flag triggers |
+| `FOREX_BLACKOUT_ENABLED` | `1` | Apply the CIB filter by default (`0` disables) |
+| `FOREX_BLACKOUT_BUFFER_PIPS` | `0.0` | Extra pips the close must clear the prior range by before the CIB flag triggers |
 
-Example: require a 10-pip clearance beyond the previous day's range before
-a close counts as a blackout, and keep older coils visible:
+Example: require a 10-pip clearance beyond the previous day's range before a
+close counts as CIB, and keep older coils visible:
 
 ```bash
 FOREX_BLACKOUT_BUFFER_PIPS=10 FOREX_BLACKOUT_ENABLED=0 \
@@ -60,15 +68,22 @@ python forex_scanner.py wl rm mylist
 
 ## Windows
 
-Double-click `RunScanner.bat`.
+Double-click `RunScanner.bat` (checks that Python is installed and reports
+the scanner's exit code).
 
 ## Development
 
+Requires Python 3.10+.
+
 ```bash
 pip install -r requirements.txt
+pip install pytest ruff
 pytest                 # unit tests
 ruff check forex_scanner tests
 ```
+
+CI runs lint + tests on every push via GitHub Actions
+(`.github/workflows/ci.yml`).
 
 ## Disclaimer
 

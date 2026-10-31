@@ -52,55 +52,113 @@ def create_watchlist(name: str, pairs: list) -> None:
 # Output
 # ---------------------------------------------------------------------------
 
+def _cib_style(color: str, direction: str) -> str:
+    """Colour a CIB row by breach direction: closing above = green, below = red."""
+    base = {"green": "bold green", "red": "bold red", "neutral": "bold yellow"}
+    if direction == "up":
+        return base["green"]
+    if direction == "down":
+        return base["red"]
+    return base.get(color, "")
+
+
+def _signal_tables(plans: list) -> tuple[list, list]:
+    """Split flat plans into (inside-day rows, closed-in-blackout rows)."""
+    inside_rows, cib_rows = [], []
+    for p in plans:
+        if p.get("inside_day"):
+            inside_rows.append((p["pair"], p["inside_day"]))
+        if p.get("blackout"):
+            cib_rows.append((p["pair"], p["blackout"]))
+    return inside_rows, cib_rows
+
+
+def _render_tables(target: Console, inside_rows: list, cib_rows: list) -> None:
+    """Print the inside-day and CIB grids onto ``target``."""
+    if inside_rows:
+        t = _build_inside_table(inside_rows)
+        target.print(t)
+        target.print()
+    if cib_rows:
+        t = _build_cib_table(cib_rows)
+        target.print(t)
+        target.print()
+
+
+def _build_inside_table(rows: list) -> Table:
+    table = Table(title="🟩🟥 INSIDE DAY — Breakout Levels", box=box.DOUBLE_EDGE)
+    table.add_column("Pair", style="cyan")
+    table.add_column("Date")
+    table.add_column("Candle")
+    table.add_column("Breakout ↑", style="green")
+    table.add_column("Breakout ↓", style="red")
+    table.add_column("Range (Pips)")
+
+    for pair, inside in rows:
+        pips = round(inside["range"] / pip_size(pair), 1)
+        table.add_row(
+            pair,
+            inside["inside_date"].strftime("%Y-%m-%d"),
+            inside["color"],
+            f"{inside['breakout_up']:.5f}",
+            f"{inside['breakout_down']:.5f}",
+            f"{pips} pips",
+            style=COLOR_MAP[inside["color"]],
+        )
+    return table
+
+
+def _build_cib_table(rows: list) -> Table:
+    table = Table(title="⚫ CLOSED IN BREAKOUT (CIB)", box=box.DOUBLE_EDGE)
+    table.add_column("Pair", style="cyan")
+    table.add_column("Date")
+    table.add_column("Candle")
+    table.add_column("Close")
+    table.add_column("Prev High")
+    table.add_column("Prev Low")
+    table.add_column("Breach")
+
+    for pair, bo in rows:
+        arrow = "↑" if bo["direction"] == "up" else "↓"
+        if bo["direction"] == "up":
+            breach = f"C {bo['close']:.5f} > H {bo['prev_high']:.5f}"
+        else:
+            breach = f"C {bo['close']:.5f} < L {bo['prev_low']:.5f}"
+        table.add_row(
+            pair,
+            bo["date"].strftime("%Y-%m-%d"),
+            bo["color"],
+            f"{bo['close']:.5f}",
+            f"{bo['prev_high']:.5f}",
+            f"{bo['prev_low']:.5f}",
+            f"{arrow} {breach}",
+            style=_cib_style(bo["color"], bo["direction"]),
+        )
+    return table
+
+
 def print_daily_plan(plans: list) -> None:
-    if not plans:
-        console.print("[bold yellow]No Inside-Day or Blackout setups "
+    """Render the two signals as separate, colour-coded grids.
+
+    Falls back to a wide fixed-width console on narrow terminals so tables
+    are never silently dropped or crash the scan.
+    """
+    inside_rows, cib_rows = _signal_tables(plans)
+    if not inside_rows and not cib_rows:
+        console.print("[bold yellow]No Inside-Day or Closed-in-Breakout setups "
                       "found for today's plan.[/bold yellow]\n")
         return
 
-    table = Table(title="🎯 TODAY'S PLAN (Inside-Day Breakouts & Closed-in-Blackout)",
-                  box=box.DOUBLE_EDGE)
-    table.add_column("Pair", style="cyan")
-    table.add_column("Signal")
-    table.add_column("Date")
-    table.add_column("Color")
-    table.add_column("Buy Stop (Break ↑)", style="green")
-    table.add_column("Sell Stop (Break ↓)", style="red")
-    table.add_column("Range (Pips)")
-
-    for p in plans:
-        inside = p.get("inside_day")
-        blackout = p.get("blackout")
-        if inside:
-            pips = round(inside["range"] / pip_size(p["pair"]), 1)
-            table.add_row(
-                p["pair"],
-                "Inside Day",
-                inside["inside_date"].strftime("%Y-%m-%d"),
-                inside["color"],
-                f"{inside['breakout_up']:.5f}",
-                f"{inside['breakout_down']:.5f}",
-                f"{pips} pips",
-                style=COLOR_MAP[inside["color"]],
-            )
-        if blackout:
-            bo = blackout  # dict with direction/date/color/close/prev_high/prev_low/range
-            arrow = "↑" if bo["direction"] == "up" else "↓"
-            pips = round(bo["range"] / pip_size(p["pair"]), 1)
-            table.add_row(
-                p["pair"],
-                f"⚫ Closed in Blackout {arrow}",
-                bo["date"].strftime("%Y-%m-%d"),
-                bo["color"],
-                f"C {bo['close']:.5f} > H {bo['prev_high']:.5f}"
-                if bo["direction"] == "up" else "-",
-                f"C {bo['close']:.5f} < L {bo['prev_low']:.5f}"
-                if bo["direction"] == "down" else "-",
-                f"{pips} pips",
-                style="bold magenta",
-            )
-    console.print(table)
-    console.print()
+    try:
+        _render_tables(console, inside_rows, cib_rows)
+    except Exception:  # noqa: BLE001 - rendering fallback must be broad
+        # Rich raises when columns don't fit narrow/piped terminals; retry
+        # once on a guaranteed-wide console.
+        try:
+            _render_tables(Console(width=110), inside_rows, cib_rows)
+        except Exception:  # pragma: no cover - extreme environments only  # noqa: BLE001
+            console.print("[red]Unable to render tables in this terminal; "
+                          "run with a wider window.[/red]")
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +191,7 @@ def run_scan(pairs: list, force: bool, blackout_filter: bool | None = None) -> i
     n_inside = sum(1 for p in daily_plans if p.get("inside_day"))
     n_blackout = sum(1 for p in daily_plans if p.get("blackout"))
     summary = (f"Scanned {scanned}/{len(pairs)} pairs — "
-               f"{n_inside} inside-day setup(s), {n_blackout} closed-in-blackout.")
+               f"{n_inside} inside-day setup(s), {n_blackout} closed-in-breakout (CIB).")
     if failed:
         summary += f" Fetch failed for: {', '.join(failed)}"
         console.print(f"[bold red]{summary}[/bold red]")
@@ -200,14 +258,14 @@ def cmd_wl(args, wl_parser: argparse.ArgumentParser) -> int:
 def build_parser():
     ap = argparse.ArgumentParser(
         prog="forex_scanner",
-        description="Forex Inside-Day Scanner — scans major FX pairs for "
-                    "daily inside-day compressions and builds a breakout plan.",
+        description="Forex scanner — detects daily inside-day compressions and "
+                    "closed-in-breakout (CIB) sessions across major FX pairs.",
         epilog="Disclaimer: educational analysis tool only — not financial advice.",
     )
     ap.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     sub = ap.add_subparsers(dest="cmd")
 
-    p_scan = sub.add_parser("scan", help="Scan pairs for inside days & blackout closes")
+    p_scan = sub.add_parser("scan", help="Scan pairs for inside days & closed-in-breakout sessions")
     p_scan.add_argument("--set", choices=["majors", "crosses", "all"], default="all")
     p_scan.add_argument("--watchlist", help="Use a saved watchlist")
     p_scan.add_argument("--force", action="store_true", help="Bypass cache")

@@ -185,6 +185,23 @@ def run_scan(pairs: list, force: bool, cib_filter: bool | None = None) -> int:
             continue
         plan = get_daily_plan(p, df, **kwargs)
         if plan:
+            # Audit trail: show the exact bars each signal was computed from
+            # so a questionable flag can be checked against your chart.
+            bo = plan.get("cib") or plan.get("blackout")
+            if bo:
+                arrow = "↑" if bo["direction"] == "up" else "↓"
+                console.print(
+                    f"[dim]{p}: CIB {arrow} on {bo['date']:%Y-%m-%d} — "
+                    f"close {bo['close']:.5f} vs prev day "
+                    f"({bo['previous_date']:%Y-%m-%d}) "
+                    f"H {bo['prev_high']:.5f} / L {bo['prev_low']:.5f}[/dim]"
+                )
+            if plan.get("inside_day"):
+                idy = plan["inside_day"]
+                console.print(
+                    f"[dim]{p}: inside day {idy['inside_date']:%Y-%m-%d} "
+                    f"in mother {idy['mother_date']:%Y-%m-%d}[/dim]"
+                )
             daily_plans.append(plan)
 
     print_daily_plan(daily_plans)

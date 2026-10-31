@@ -179,3 +179,14 @@ def test_cib_ignores_partial_today_bar():
     # The partial close above yesterday's high must NOT flag a CIB.
     assert plan["cib"] is None
     assert plan["inside_day"] is not None
+
+
+def test_completed_bars_handles_time_of_day_timestamps():
+    """Rows carrying a session time (not midnight) dated today are still dropped."""
+    today = pd.Timestamp.today().normalize()
+    idx = [today - pd.Timedelta(days=2), today - pd.Timedelta(days=1),
+           today + pd.Timedelta(hours=14, minutes=30)]
+    df = pd.DataFrame({"Open": [1.0]*3, "High": [1.1]*3, "Low": [0.9]*3,
+                       "Close": [1.05]*3}, index=pd.DatetimeIndex(idx))
+    bars = strategy.completed_bars(df)
+    assert len(bars) == 2
